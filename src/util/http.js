@@ -65,18 +65,20 @@ function once(rawUrl, { headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal } =
       headers: { 'User-Agent': 'token-tool/0.2.0', Accept: 'application/json', ...headers },
     };
 
+    // A pre-aborted signal must reject BEFORE the timer exists — calling
+    // onAbort() here would touch `req` above its declaration (TDZ ReferenceError)
+    // and leak the timeout, whose later firing crashes the process.
+    if (signal?.aborted) {
+      reject(new HttpError('aborted', { status: 'timeout' }));
+      return;
+    }
+
     const timer = setTimeout(() => {
       req.destroy(new HttpError('request timeout', { status: 'timeout' }));
     }, timeoutMs);
 
     const onAbort = () => req.destroy(new HttpError('aborted', { status: 'timeout' }));
-    if (signal) {
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
     const req = lib.request(reqOptions, (res) => {
       const chunks = [];

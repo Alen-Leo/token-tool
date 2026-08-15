@@ -247,10 +247,13 @@ async function handleApi(req, res, url, handlers = {}) {
     } catch {
       return send(res, 400, { error: 'invalid json' });
     }
-    const { provider: id, fields, ui } = parsed || {};
+    const { provider: id, fields: rawFields, ui } = parsed || {};
     if (!id && !ui) return send(res, 400, { error: 'nothing to update' });
     if (id && !getProvider(id)) return send(res, 400, { error: 'unknown provider' });
-    if (fields != null && (typeof fields !== 'object' || Array.isArray(fields))) return send(res, 400, { error: 'missing fields' });
+    // Absent fields = no field updates (e.g. a ui-only body that names a
+    // provider); a present-but-non-object fields is a client error.
+    const fields = rawFields ?? {};
+    if (typeof fields !== 'object' || Array.isArray(fields)) return send(res, 400, { error: 'invalid fields' });
 
     const next = saveConfig((c) => {
       c.providers = c.providers || {};

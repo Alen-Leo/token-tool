@@ -38,7 +38,7 @@ export function parseCredits(body, lang = 'en') {
   const parts = [];
   if (usage != null) parts.push({ label: tr(lang, 'parts.purchased'), value: round(total, 4) });
   if (usage != null) parts.push({ label: tr(lang, 'parts.used'), value: round(usage, 4) });
-  parts.push({ label: tr(lang, 'parts.remaining'), value: remaining });
+  // Remaining IS the headline number — not repeated as a part row.
   return {
     balances: [
       {

@@ -39,7 +39,7 @@ export function parseBalance(body, lang = 'en') {
   const parts = [];
   if (charge != null) parts.push({ label: tr(lang, 'parts.paidIn'), value: round(charge, 4) });
   if (promo != null) parts.push({ label: tr(lang, 'parts.promotional'), value: round(promo, 4) });
-  parts.push({ label: tr(lang, 'parts.total'), value: round(total, 4) });
+  // The total IS the headline number — not repeated as a part row.
   const status = String(body?.status);
   // status is a boolean in the spec; treat explicit false as an error envelope.
   const isAvailable = status !== 'false';

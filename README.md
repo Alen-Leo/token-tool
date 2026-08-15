@@ -22,7 +22,7 @@
 | 服务商 | 鉴权 | 展示内容 |
 |---|---|---|
 | **Z.ai / GLM** | API Key（`Bearer`） | 套餐名 + 用量窗口（5 小时会话 / 周配额 / 月度 MCP），含已用百分比、Token 数与重置时间，以及订阅续费日期与一句话摘要。 |
-| **DeepSeek** | API Key（`Bearer`）+ 可选网页授权 | 预付余额（总额 / 赠送 / 充值）+ 官网同源用量看板：今日 / 本月 / 累计消费、每日消费柱状图、按模型与按 API Key 的花费 / 请求 / Token（含缓存命中）明细。 |
+| **DeepSeek** | API Key（`Bearer`）+ 可选网页授权 | 预付余额（含今日与近 30 天消费）+ 按模型的当日 Token 消耗（命中缓存 / 未命中缓存 / 输出）。 |
 | **OpenCode Go** | API Key（`Bearer`） | Key 有效性 + 计划解锁的模型数量与列表；当本机装了 OpenCode 时，展示**本地花费窗口**（会话 / 周 / 月，对照 `$12/$30/$60` 套餐上限）。 |
 | **OpenRouter** | API Key（`Bearer`） | 账户积分余额（已购 / 已用 / 剩余，USD）。 |
 | **SiliconFlow（硅基流动）** | API Key（`Bearer`） | 账户余额（总额 / 充值 / 赠送，CNY）。 |
@@ -125,7 +125,7 @@ token-tool/
 ## 运行测试
 
 ```bash
-npm test     # node --test tests/
+npm test     # node --test（递归发现 tests/ 下的 *.test.js）
 ```
 
 ## 许可证

@@ -69,7 +69,8 @@ const DEFAULTS = Object.freeze({
   port: 0, // 0 = pick a free port
   openBrowser: true,
   // UI preferences: display language ('en' | 'zh') and card order (provider ids).
-  ui: { lang: 'en', order: [] },
+  // Fresh installs default to Chinese — most users are zh speakers.
+  ui: { lang: 'zh', order: [] },
   // providers: { zai: { apiKey, region }, deepseek: { apiKey }, opencode: { apiKey } }
   providers: {},
 });

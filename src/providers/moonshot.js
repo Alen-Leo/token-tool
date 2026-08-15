@@ -56,7 +56,7 @@ export function parseBalance(body, lang = 'en') {
   const parts = [];
   if (cash != null) parts.push({ label: tr(lang, 'parts.cash'), value: round(cash, 4) });
   if (voucher != null) parts.push({ label: tr(lang, 'parts.voucher'), value: round(voucher, 4) });
-  parts.push({ label: tr(lang, 'parts.available'), value: round(available, 4) });
+  // The available total IS the headline number — not repeated as a part row.
   return {
     isAvailable: available > 0,
     balances: [

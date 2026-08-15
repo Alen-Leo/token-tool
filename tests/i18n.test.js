@@ -8,15 +8,15 @@ import { relativeFromNow } from '../src/util/format.js';
 
 test('tr default language is English and fills placeholders', () => {
   assert.equal(tr('en', 'window.weekly'), 'Weekly');
-  assert.equal(tr('en', 'summary.keyValid', 25), 'Key valid · 25 models');
-  assert.equal(tr('en', 'summary.rolling', '0.12', '12', 1), 'rolling $0.12/$12 (1%)');
+  assert.equal(tr('en', 'summary.session', 42), 'session 42%');
+  assert.equal(tr('en', 'summary.remaining', '5.00'), 'Remaining $5.00');
 });
 
 test('tr zh returns Chinese copy', () => {
   assert.equal(tr('zh', 'window.weekly'), '本周');
-  assert.equal(tr('zh', 'summary.keyValid', 25), '密钥有效 · 25 个模型');
-  assert.equal(tr('zh', 'parts.totalSpend'), '累计消费');
-  assert.equal(tr('zh', 'summary.balance'), '余额 {0} {1}');
+  assert.equal(tr('zh', 'summary.session', 42), '会话 42%');
+  assert.equal(tr('zh', 'parts.last30d'), '近30天');
+  assert.equal(tr('zh', 'summary.todaySpend'), '今日 {0} {1}');
 });
 
 test('tr falls back to English for a key missing in zh', () => {

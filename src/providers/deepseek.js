@@ -45,7 +45,7 @@ const MAX_USAGE_RANGE_SEC = 30 * 86_400; // usage endpoints reject spans > 30 da
 export const meta = {
   id: 'deepseek',
   name: 'DeepSeek',
-  description: 'Balance + usage board (today/month spend, per-model & per-key breakdown). Web token optional.',
+  description: 'Balance + usage board (today/month spend, per-model breakdown). Web token optional.',
   doc: 'https://platform.deepseek.com/usage',
   configFields: [
     { key: 'apiKey', label: 'API Key', type: 'password', required: false, env: ['DEEPSEEK_API_KEY'] },
@@ -145,11 +145,11 @@ export function parseWebSummary(body) {
   };
 }
 
-// Time range for the month-to-date usage query. Mirrors the console client:
-// the device timezone is truncated to whole hours, start/end are day
-// boundaries in that truncated tz, end is exclusive (start of tomorrow), and
-// the span is clamped to 30 days (31-day months get a rolling window).
-export function buildMonthRange(nowMs = Date.now(), tzSec = -new Date(nowMs).getTimezoneOffset() * 60) {
+// Time range for the usage query. Mirrors the console client's tz rules: the
+// device timezone is truncated to whole hours, start/end are day boundaries in
+// that truncated tz, end is exclusive (start of tomorrow). The window is a
+// rolling 30 days — the API's maximum span.
+export function buildUsageRange(nowMs = Date.now(), tzSec = -new Date(nowMs).getTimezoneOffset() * 60) {
   const tz = 3600 * Math.floor(tzSec / 3600);
   const local = new Date(nowMs + tz * 1000);
   const y = local.getUTCFullYear();
@@ -158,54 +158,41 @@ export function buildMonthRange(nowMs = Date.now(), tzSec = -new Date(nowMs).get
   const dayStart = (yy, mm, dd) => Date.UTC(yy, mm, dd) / 1000 - tz;
   const todayStart = dayStart(y, mo, d);
   const end = dayStart(y, mo, d + 1); // Date.UTC rolls day overflow into the next month
-  let start = dayStart(y, mo, 1);
-  if (end - start > MAX_USAGE_RANGE_SEC) start = end - MAX_USAGE_RANGE_SEC;
+  const start = end - MAX_USAGE_RANGE_SEC;
   return { start, end, tz, todayStart };
 }
 
-// Aggregate the usage-board responses into the month view:
+// Aggregate the usage-board responses into the 30-day window view:
 //   cost body   → data: [ { currency, series: [ { api_key, model,
 //                  buckets: [ { time, cost } ] } ] } ]
 //   amount body → series: [ { api_key, model, buckets: [ { time, usage: {
 //                  REQUEST, PROMPT_CACHE_HIT_TOKEN, PROMPT_CACHE_MISS_TOKEN,
 //                  RESPONSE_TOKEN } } ] } ]
-// `api_key` is a resolved object { tracking_id, name, sensitive_id } (a plain
-// string id is tolerated). Costs are aggregated in the first currency group —
+// Buckets are keyed by day (`time` = local day start, matching todayStart).
+// The cost body feeds only the money totals; the amount body feeds token
+// totals plus the per-model TODAY token breakdown. Series carry an `api_key`
+// object which we ignore. Costs are aggregated in the first currency group —
 // accounts are single-currency (the console shows a currency picker for the
 // same reason).
-export function parseWebUsage(costBody, amountBody, { todayStart = null, tz = 0 } = {}) {
+export function parseWebUsage(costBody, amountBody, { todayStart = null } = {}) {
   const cost = ensureOk(costBody, 'usage query');
   const amount = ensureOk(amountBody, 'usage query');
   if (!cost && !amount) return null;
 
   const models = new Map();
-  const keys = new Map();
-  const dailyCost = new Map();
-  const dailyTokens = new Map();
   const totals = { requests: 0, inputTokens: 0, cacheHitTokens: 0, outputTokens: 0, todayRequests: 0 };
 
   const model_ = (name) => {
     let m = models.get(name);
     if (!m) {
-      m = { model: name, cost: 0, requests: 0, inputTokens: 0, cacheHitTokens: 0, outputTokens: 0 };
+      m = { model: name, todayInputTokens: 0, todayCacheHitTokens: 0, todayOutputTokens: 0 };
       models.set(name, m);
     }
     return m;
   };
-  const keyIdOf = (k) => (typeof k === 'string' ? k : (k?.tracking_id || k?.sensitive_id || 'key'));
-  const keyNameOf = (k) => (typeof k === 'string' ? k : (String(k?.name || '').trim() || String(k?.sensitive_id || 'API key')));
-  const key_ = (k) => {
-    const id = keyIdOf(k);
-    let e = keys.get(id);
-    if (!e) {
-      e = { name: keyNameOf(k), cost: 0, requests: 0, tokens: 0 };
-      keys.set(id, e);
-    }
-    return e;
-  };
 
   let currency = null;
-  let monthCost = 0;
+  let last30Cost = 0;
   let todayCost = 0;
   if (cost) {
     const groups = Array.isArray(cost.data) ? cost.data : [];
@@ -213,14 +200,9 @@ export function parseWebUsage(costBody, amountBody, { todayStart = null, tz = 0 
     for (const g of groups) {
       if (currency && String(g?.currency || '').toUpperCase() !== currency) continue; // single-currency accounts
       for (const se of g?.series || []) {
-        const m = model_(String(se?.model || 'unknown'));
-        const k = key_(se?.api_key);
         for (const b of se?.buckets || []) {
           const c = toNum(b?.cost) || 0;
-          m.cost += c;
-          k.cost += c;
-          monthCost += c;
-          dailyCost.set(b.time, (dailyCost.get(b.time) || 0) + c);
+          last30Cost += c;
           if (todayStart != null && b.time === todayStart) todayCost += c;
         }
       }
@@ -230,45 +212,32 @@ export function parseWebUsage(costBody, amountBody, { todayStart = null, tz = 0 
   if (amount) {
     for (const se of amount?.series || []) {
       const m = model_(String(se?.model || 'unknown'));
-      const k = key_(se?.api_key);
       for (const b of se?.buckets || []) {
         const u = b?.usage || {};
         const req = toNum(u.REQUEST) || 0;
         const inTok = toNum(u.PROMPT_CACHE_MISS_TOKEN) || 0;
         const hit = toNum(u.PROMPT_CACHE_HIT_TOKEN) || 0;
         const out = toNum(u.RESPONSE_TOKEN) || 0;
-        m.requests += req; m.inputTokens += inTok; m.cacheHitTokens += hit; m.outputTokens += out;
-        k.requests += req; k.tokens += inTok + hit + out;
         totals.requests += req; totals.inputTokens += inTok; totals.cacheHitTokens += hit; totals.outputTokens += out;
-        dailyTokens.set(b.time, (dailyTokens.get(b.time) || 0) + inTok + hit + out);
-        if (todayStart != null && b.time === todayStart) totals.todayRequests += req;
+        if (todayStart != null && b.time === todayStart) {
+          totals.todayRequests += req;
+          m.todayInputTokens += inTok;
+          m.todayCacheHitTokens += hit;
+          m.todayOutputTokens += out;
+        }
       }
     }
   }
 
-  const daily = [...dailyCost.keys()]
-    .sort((a, b) => a - b)
-    .map((time) => ({
-      time,
-      date: new Date((time + tz) * 1000).toISOString().slice(5, 10), // MM-DD in the query tz
-      cost: round(dailyCost.get(time) || 0, 4),
-      tokens: dailyTokens.get(time) || 0,
-    }));
-
+  const todayTotal = (m) => m.todayInputTokens + m.todayCacheHitTokens + m.todayOutputTokens;
   return {
     currency,
-    monthCost: round(monthCost, 4),
+    last30Cost: round(last30Cost, 4),
     todayCost: round(todayCost, 4),
     ...totals,
     models: [...models.values()]
-      .filter((m) => m.cost > 0 || m.requests > 0)
-      .sort((a, b) => b.cost - a.cost)
-      .map((m) => ({ ...m, cost: round(m.cost, 4) })),
-    keys: [...keys.values()]
-      .filter((k) => k.cost > 0 || k.requests > 0)
-      .sort((a, b) => b.cost - a.cost)
-      .map((k) => ({ ...k, cost: round(k.cost, 4) })),
-    daily,
+      .filter((m) => todayTotal(m) > 0)
+      .sort((a, b) => todayTotal(b) - todayTotal(a)),
   };
 }
 
@@ -293,7 +262,6 @@ export async function fetch({ config, lang = 'en' }) {
 
   // --- API-key balance path (always when a key is present) -----------------
   let balances = [];
-  let isAvailable = true;
   let spend = null;
   let apiError = null;
   let apiStatus = null;
@@ -305,7 +273,6 @@ export async function fetch({ config, lang = 'en' }) {
       );
       const parsed = parseBalances(body);
       balances = parsed.balances;
-      isAvailable = parsed.isAvailable;
       const primary = balances[0] || null;
       // Track spend only on real queries — the /api/test route passes
       // skipSpendTrack so a Test (which may use a different account's key)
@@ -330,7 +297,7 @@ export async function fetch({ config, lang = 'en' }) {
   let usageDetail = null;
   let usageError = null;
   if (webToken) {
-    const range = buildMonthRange();
+    const range = buildUsageRange();
     const auth = { Authorization: `Bearer ${webToken}` };
     const call = (path, qs = '') =>
       withDeadline(
@@ -361,7 +328,7 @@ export async function fetch({ config, lang = 'en' }) {
     // second identical error on top.
     if (costR.ok) {
       try {
-        usageDetail = parseWebUsage(costR.v, amountR.ok ? amountR.v : null, { todayStart: range.todayStart, tz: range.tz });
+        usageDetail = parseWebUsage(costR.v, amountR.ok ? amountR.v : null, { todayStart: range.todayStart });
       } catch (err) {
         usageError = String(err?.message || err);
       }
@@ -376,25 +343,13 @@ export async function fetch({ config, lang = 'en' }) {
   // Determine overall status.
   const hasData = balances.length > 0 || webUsage || usageDetail;
   const notes = [];
-  const summaryParts = [];
 
   if (webUsage || usageDetail) {
     notes.push(tr(lang, 'note.usageViaWeb'));
-    const cur = usageDetail?.currency || webUsage?.totalCosts[0]?.currency || 'USD';
-    if (usageDetail?.monthCost != null) summaryParts.push(tr(lang, 'summary.thisMonth', round(usageDetail.monthCost, 2).toFixed(2), cur));
-    if (usageDetail?.todayCost != null) summaryParts.push(tr(lang, 'summary.todaySpend', round(usageDetail.todayCost, 2).toFixed(2), cur));
-    if (webUsage?.totalUsage != null) summaryParts.push(tr(lang, 'summary.allTime', round(webUsage.totalUsage, 2).toFixed(2), cur));
-    if (!balances.length && (webUsage?.wallets.length || usageDetail)) {
-      // No API key, but web wallets give us the balance.
-      const w = webUsage?.wallets[0];
-      if (w && w.balance != null) {
-        balances = [{ currency: w.currency, total: w.balance, granted: null, toppedUp: null, bonus: w.bonus }];
-      }
-    }
-    // Wallet balances from the web session (primary non-bonus wallet).
-    const mainWallet = webUsage?.wallets.find((w) => !w.bonus) || webUsage?.wallets[0];
-    if (mainWallet && mainWallet.balance != null) {
-      summaryParts.push(tr(lang, 'summary.balance', round(mainWallet.balance, 2).toFixed(2), mainWallet.currency));
+    if (!balances.length && webUsage?.wallets.length) {
+      // No API key — the main (non-bonus) web wallet carries the balance.
+      const main = webUsage.wallets.find((w) => !w.bonus) || webUsage.wallets[0];
+      balances = [{ currency: main.currency, total: main.balance }];
     }
     if (usageError) notes.push(tr(lang, 'note.usageFailed', usageError));
     // Summary rejected while the usage pair still answered (rare — e.g. the
@@ -406,16 +361,8 @@ export async function fetch({ config, lang = 'en' }) {
     // the API-key balance. webError itself is a platform/HTTP message — kept
     // verbatim.
     notes.push(tr(lang, 'note.webRejected', webError));
-    summaryParts.push(tr(lang, 'summary.usageUnavailable'));
   } else if (balances.length > 0) {
     notes.push(tr(lang, 'note.webNotSet'));
-  }
-
-  if (balances.length > 0 && !summaryParts.length) {
-    const primary = balances[0];
-    const amt = round(primary.total, 2).toFixed(2);
-    summaryParts.push(tr(lang, 'summary.balanceToday', amt, primary.currency) + (isAvailable ? '' : tr(lang, 'summary.insufficient')));
-    if (spend?.tracked) summaryParts.push(tr(lang, 'summary.today', round(spend.todaySpend, 2).toFixed(2)));
   }
 
   if (apiError && !hasData) {
@@ -446,32 +393,26 @@ export async function fetch({ config, lang = 'en' }) {
     };
   }
 
-  // Build usage parts for the UI.
-  const usageParts = [];
+  // Money rows live inside the balance block (no separate box): today +
+  // last-30-days from the usage board, or today from the local tracker. The
+  // balance composition (topped-up / granted) is deliberately not shown.
+  const spendRows = [];
   if (usageDetail) {
     const cur = usageDetail.currency || 'USD';
-    usageParts.push({ label: tr(lang, 'parts.today'), value: usageDetail.todayCost, unit: 'currency', currency: cur });
-    usageParts.push({ label: tr(lang, 'parts.thisMonth'), value: usageDetail.monthCost, unit: 'currency', currency: cur });
+    if (usageDetail.todayCost != null) spendRows.push({ label: tr(lang, 'parts.today'), value: round(usageDetail.todayCost, 2), currency: cur });
+    if (usageDetail.last30Cost != null) spendRows.push({ label: tr(lang, 'parts.last30d'), value: round(usageDetail.last30Cost, 2), currency: cur });
+  } else if (spend?.tracked) {
+    spendRows.push({ label: tr(lang, 'parts.today'), value: round(spend.todaySpend, 2), currency: spend.currency });
   }
-  if (webUsage) {
-    const cur = usageDetail?.currency || webUsage.totalCosts[0]?.currency || 'USD';
-    if (webUsage.totalUsage != null) usageParts.push({ label: tr(lang, 'parts.allTime'), value: webUsage.totalUsage, unit: 'currency', currency: cur });
-    // Wallet balances (normal + bonus) from the web session.
-    for (const w of webUsage.wallets) {
-      if (w.balance == null) continue;
-      usageParts.push({
-        label: tr(lang, w.bonus ? 'parts.bonusBalance' : 'parts.balance'),
-        value: w.balance,
-        unit: 'currency',
-        currency: w.currency,
-      });
-    }
-  } else if (!webError && !usageDetail && spend?.tracked) {
-    usageParts.push(
-      { label: tr(lang, 'parts.today'), value: spend.todaySpend, unit: 'currency', currency: 'CNY' },
-      { label: tr(lang, 'parts.thisMonth'), value: spend.monthSpend, unit: 'currency', currency: 'CNY' },
-      { label: tr(lang, 'parts.allTime'), value: spend.allTimeSpend, unit: 'currency', currency: 'CNY' },
-    );
+  if (balances.length && spendRows.length) balances[0].parts = spendRows;
+
+  // The balance block below carries the figures — no summary line duplicating
+  // it. summary remains only as a fallback when no balance block can render.
+  let summary = null;
+  if (!balances.length) {
+    summary = usageDetail?.todayCost != null
+      ? tr(lang, 'summary.todaySpend', round(usageDetail.todayCost, 2).toFixed(2), usageDetail.currency || 'USD')
+      : tr(lang, 'summary.noBalance');
   }
 
   return {
@@ -480,16 +421,12 @@ export async function fetch({ config, lang = 'en' }) {
     dashboard: 'https://platform.deepseek.com/usage',
     status: hasData ? 'ok' : 'unavailable',
     updatedAt,
-    isAvailable,
     balances,
-    spend: spend || null,
-    usageParts,
     usageDetail: usageDetail || null,
-    webUsage: webUsage || null,
     webError: webError || null,
     windows: [],
     note: notes.length ? notes.join(' ') : null,
-    summary: summaryParts.join(' · ') || tr(lang, 'summary.noBalance'),
+    summary,
   };
 }
 
@@ -501,7 +438,6 @@ function notConfigured(updatedAt) {
     status: 'notConfigured',
     updatedAt,
     balances: [],
-    usageParts: [],
     windows: [],
   };
 }

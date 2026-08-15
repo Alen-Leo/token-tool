@@ -33,8 +33,6 @@
       'card.renews': 'Renews',
       'card.noKeySet': 'No API key set. Open ⚙ Settings to add one.',
       'card.insufficientBalance': 'Insufficient balance',
-      'card.granted': 'granted',
-      'card.toppedUp': 'topped-up',
       'card.console': 'console ↗',
       'card.updated': 'updated {0}',
       'card.region.title': 'region: {0}',
@@ -43,14 +41,11 @@
       'card.openCode.src.defaults': 'No usage data yet — plan limits shown',
       'card.openCode.src.local': 'Local usage from OpenCode database',
       // deepseek usage board
-      'ds.dailySpend': 'Daily spend (this month)',
-      'ds.byModel': 'By model',
-      'ds.byKey': 'By API key',
-      'ds.requests': '{0} requests',
-      'ds.tokIn': 'in {0}',
-      'ds.tokCache': 'cache hit {0}',
-      'ds.tokOut': 'out {0}',
-      'ds.noUsage': 'No usage this month',
+      'ds.byModelToday': 'Today by model',
+      'ds.tokCacheHit': 'Input (cache hit)',
+      'ds.tokCacheMiss': 'Input (cache miss)',
+      'ds.tokOut': 'Output',
+      'ds.noUsage': 'No usage today',
       'top.updated': 'updated {0} · {1}',
       'top.refreshing': '↻ Refreshing…',
       'error.session': 'Session expired or unauthorized. Relaunch token-tool.',
@@ -114,8 +109,6 @@
       'card.renews': '续费',
       'card.noKeySet': '未设置 API 密钥。请在 ⚙ 配置 中添加。',
       'card.insufficientBalance': '余额不足',
-      'card.granted': '赠送',
-      'card.toppedUp': '充值',
       'card.console': '控制台 ↗',
       'card.updated': '更新于 {0}',
       'card.region.title': '区域：{0}',
@@ -124,14 +117,11 @@
       'card.openCode.src.defaults': '暂无用量数据 — 显示套餐上限',
       'card.openCode.src.local': '来自 OpenCode 本地数据库的用量',
       // deepseek usage board
-      'ds.dailySpend': '每日消费（本月）',
-      'ds.byModel': '按模型',
-      'ds.byKey': '按 API Key',
-      'ds.requests': '{0} 次请求',
-      'ds.tokIn': '输入 {0}',
-      'ds.tokCache': '缓存命中 {0}',
-      'ds.tokOut': '输出 {0}',
-      'ds.noUsage': '本月暂无用量',
+      'ds.byModelToday': '当日按模型',
+      'ds.tokCacheHit': '输入（命中缓存）',
+      'ds.tokCacheMiss': '输入（未命中缓存）',
+      'ds.tokOut': '输出',
+      'ds.noUsage': '当日暂无用量',
       'top.updated': '更新于 {0} · {1}',
       'top.refreshing': '↻ 刷新中…',
       'error.session': '会话已过期或未授权，请重新启动 token-tool。',
@@ -170,16 +160,11 @@
     },
   };
 
-  let lang = 'en';
+  // Chinese is the default language; the persisted config may override it.
+  let lang = 'zh';
 
   function normalizeLang(l) {
     return l === 'zh' ? 'zh' : 'en';
-  }
-
-  // Best guess from the browser's language (zh* → Chinese, anything else → en).
-  function detectLang() {
-    const nav = (navigator.language || navigator.languages?.[0] || '').toLowerCase();
-    return normalizeLang(nav.startsWith('zh') ? 'zh' : 'en');
   }
 
   // Translate a key, filling {n} placeholders positionally.
@@ -209,5 +194,5 @@
     document.documentElement.lang = lang;
   }
 
-  window.TT_I18N = { t, setLang, currentLang, detectLang, applyStaticText };
+  window.TT_I18N = { t, setLang, currentLang, applyStaticText };
 })();

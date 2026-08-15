@@ -22,7 +22,7 @@ Inspired by the open-source [Javis603/token-monitor](https://github.com/Javis603
 | Provider | Auth | What you see |
 |---|---|---|
 | **Z.ai / GLM** | API key (`Bearer`) | Plan name + usage windows: 5-hour (session), Weekly, Monthly (MCP) — each with used %, token counts and reset time — plus the subscription renewal date and a one-line summary. |
-| **DeepSeek** | API key (`Bearer`) + optional web login | Prepaid balance (total / granted / topped-up) + the usage board the official console shows: today / this-month / all-time spend, a daily spend chart, and per-model / per-API-key cost, request & token (incl. cache-hit) breakdowns. |
+| **DeepSeek** | API key (`Bearer`) + optional web login | Prepaid balance (with today & last-30-day spend) plus today's per-model token consumption (cache-hit / cache-miss input, output). |
 | **OpenCode Go** | API key (`Bearer`) | Key liveness + count & list of models the plan unlocks; **local spend windows** when OpenCode is installed locally (session/weekly/monthly vs `$12/$30/$60` plan limits). |
 | **OpenRouter** | API key (`Bearer`) | Account credits remaining (purchased / used / remaining, USD). |
 | **SiliconFlow (硅基流动)** | API key (`Bearer`) | Account balance (total / paid-in / promotional, CNY). |
@@ -141,7 +141,7 @@ token-tool/
 ## Running tests
 
 ```bash
-npm test     # node --test tests/
+npm test     # node --test (discovers tests/*.test.js recursively)
 ```
 
 ## License

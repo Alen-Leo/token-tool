@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getJson, withDeadline, HttpError } from '../util/http.js';
-import { toNum, round, makeWindow, clampPct, relativeFromNow } from '../util/format.js';
+import { toNum, round, makeWindow, clampPct } from '../util/format.js';
 import { tr, errorText } from '../i18n.js';
 
 const BASE = 'https://opencode.ai';
@@ -202,25 +202,6 @@ function buildUsageWindows(rows, nowMs, limits, lang = 'en') {
 
 // ---- API-key probe ---------------------------------------------------------
 
-// Summary: "Key valid · 42 models · session $3/$12 (25%) · resets in 2h 30m".
-function buildGoSummary(windows, modelCount, lang) {
-  const parts = [tr(lang, 'summary.keyValid', modelCount)];
-  const session = windows.find((w) => w.kind === 'session');
-  if (session && session.used != null && session.limit != null && session.limit > 0) {
-    const pct = Math.round(session.usedPercent || 0);
-    const spent = session.used.toFixed(2);
-    const lim = session.limit.toFixed(0);
-    parts.push(tr(lang, 'summary.rolling', spent, lim, pct));
-    if (session.resetsAt) {
-      const rel = relativeFromNow(session.resetsAt, Date.now(), lang);
-      if (rel) parts.push(tr(lang, 'summary.resets', rel));
-    }
-  } else {
-    parts.push(tr(lang, 'summary.usageInConsole'));
-  }
-  return parts.join(' · ');
-}
-
 async function probeKey(key) {
   const headers = { Authorization: `Bearer ${key}` };
   const body = await withDeadline(
@@ -351,7 +332,6 @@ export async function fetch({ config, lang = 'en' }) {
       localSource: usageSource,
       remoteUsage: Boolean(remoteUsage),
       usageError,
-      summary: buildGoSummary(windows, probe.count, lang),
     };
   } catch (err) {
     const status = err instanceof HttpError ? err.status : 'unavailable';

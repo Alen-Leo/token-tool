@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseUsage } from '../src/providers/zai.js';
-import { parseBalances, parseWebSummary, parseWebUsage, buildMonthRange, meta as deepseekMeta } from '../src/providers/deepseek.js';
+import { parseBalances, parseWebSummary, parseWebUsage, buildUsageRange, meta as deepseekMeta } from '../src/providers/deepseek.js';
 import { parseCredits } from '../src/providers/openrouter.js';
 import { parseBalance as parseSiliconFlow } from '../src/providers/siliconflow.js';
 import { parseBalance as parseMoonshot } from '../src/providers/moonshot.js';
@@ -196,49 +196,45 @@ const amountBody = {
   } },
 };
 
-test('deepseek parseWebUsage aggregates month/today/model/key/daily', () => {
-  const u = parseWebUsage(costBody, amountBody, { todayStart: TODAY, tz: TZ });
+test('deepseek parseWebUsage aggregates window/today totals and per-model today tokens', () => {
+  const u = parseWebUsage(costBody, amountBody, { todayStart: TODAY });
   assert.ok(u);
   assert.equal(u.currency, 'CNY');
-  assert.equal(u.monthCost, 2); // 1 + 0.25 + 0.75 (USD group ignored)
+  assert.equal(u.last30Cost, 2); // 1 + 0.25 + 0.75 (USD group ignored)
   assert.equal(u.todayCost, 1); // 0.25 + 0.75
   assert.equal(u.requests, 15);
   assert.equal(u.todayRequests, 5);
-  assert.equal(u.inputTokens, 260); // 200+20+40 cache-miss
+  assert.equal(u.inputTokens, 260); // 200+20+40 cache-miss (month total)
   assert.equal(u.cacheHitTokens, 140); // 100+10+30
   assert.equal(u.outputTokens, 70); // 50+5+15
-  // one model, aggregated across both keys
+  // one model; per-model figures are TODAY only (both keys' today buckets):
+  // hit 10+30, miss 20+40, out 5+15
   assert.equal(u.models.length, 1);
   assert.equal(u.models[0].model, 'deepseek-v4-pro');
-  assert.equal(u.models[0].cost, 2);
-  assert.equal(u.models[0].requests, 15);
-  // keys: named key first (higher cost); unnamed falls back to sensitive_id
-  assert.equal(u.keys.length, 2);
-  assert.equal(u.keys[0].name, 'zcode');
-  assert.equal(u.keys[0].cost, 1.25);
-  assert.equal(u.keys[1].name, 'sk-b***2');
-  assert.equal(u.keys[1].cost, 0.75);
-  // daily series sorted by time, dates labeled in the query tz
-  assert.deepEqual(u.daily.map((d) => d.date), ['08-13', '08-15']);
-  assert.equal(u.daily[1].cost, 1);
-  assert.equal(u.daily[1].tokens, 120); // (10+20+5) + (30+40+15)
+  assert.equal(u.models[0].todayCacheHitTokens, 40);
+  assert.equal(u.models[0].todayInputTokens, 60);
+  assert.equal(u.models[0].todayOutputTokens, 20);
 });
 
 test('deepseek parseWebUsage works with cost alone (amount missing)', () => {
-  const u = parseWebUsage(costBody, null, { todayStart: TODAY, tz: TZ });
-  assert.equal(u.monthCost, 2);
+  const u = parseWebUsage(costBody, null, { todayStart: TODAY });
+  assert.equal(u.last30Cost, 2);
   assert.equal(u.requests, 0);
-  assert.equal(u.models[0].requests, 0);
+  // No amount body → no token data → no per-model today rows.
+  assert.equal(u.models.length, 0);
 });
 
-test('deepseek parseWebUsage drops zero models/keys', () => {
+test('deepseek parseWebUsage drops models without today usage', () => {
+  // Series has month usage on an earlier day but nothing today — the model
+  // must be omitted from the today breakdown.
   const empty = { code: 0, data: { biz_code: 0, biz_data: { data: [{ currency: 'CNY', series: [
     { api_key: keyZcode, model: 'm', buckets: [{ time: TODAY, cost: '0' }] },
-  ] }], series: [] } } };
-  const u = parseWebUsage(empty, null, { todayStart: TODAY, tz: TZ });
-  assert.equal(u.monthCost, 0);
+  ] }], series: [
+    { api_key: keyZcode, model: 'm', buckets: [{ time: TODAY - 86_400, usage: { REQUEST: 9, PROMPT_CACHE_HIT_TOKEN: 90, PROMPT_CACHE_MISS_TOKEN: 90, RESPONSE_TOKEN: 90 } }] },
+  ] } } };
+  const u = parseWebUsage(empty, empty, { todayStart: TODAY });
+  assert.equal(u.requests, 9);
   assert.equal(u.models.length, 0);
-  assert.equal(u.keys.length, 0);
 });
 
 test('deepseek parseWebUsage throws on biz INVALID_PARAM (HTTP 200)', () => {
@@ -253,41 +249,33 @@ test('deepseek parseWebUsage throws on session-token rejection and returns null 
   assert.equal(parseWebUsage({ data: {} }, { data: {} }), null);
 });
 
-// ---- buildMonthRange: the usage endpoints' alignment rules ------------------
+// ---- buildUsageRange: the usage endpoints' alignment rules ------------------
 // start/end must be day boundaries in the whole-hour-truncated device tz, end
-// exclusive (start of tomorrow), span clamped to 30 days.
-test('deepseek buildMonthRange aligns to local month/tomorrow boundaries', () => {
-  const now = Date.UTC(2026, 7, 15, 4, 30) ; // 12:30 local (+8)
-  const r = buildMonthRange(now, 8 * 3600);
+// exclusive (start of tomorrow), window a rolling 30 days (the API's max span).
+test('deepseek buildUsageRange aligns to tomorrow and spans exactly 30 days', () => {
+  const now = Date.UTC(2026, 7, 15, 4, 30); // 12:30 local (+8)
+  const r = buildUsageRange(now, 8 * 3600);
   assert.equal(r.tz, 28800);
-  assert.equal(r.start, Date.UTC(2026, 7, 1) / 1000 - 28800);
   assert.equal(r.todayStart, Date.UTC(2026, 7, 15) / 1000 - 28800);
   assert.equal(r.end, Date.UTC(2026, 7, 16) / 1000 - 28800);
-  assert.equal(r.end - r.start, 15 * DAY);
+  assert.equal(r.end - r.start, 30 * DAY);
+  assert.equal(r.start, Date.UTC(2026, 7, 16) / 1000 - 28800 - 30 * DAY);
 });
 
-test('deepseek buildMonthRange truncates half-hour timezones to whole hours', () => {
+test('deepseek buildUsageRange truncates half-hour timezones to whole hours', () => {
   // +5:30 (19800s) → tz 18000; the local day is computed in that truncated tz.
   const now = Date.UTC(2026, 7, 15, 20, 0); // 2026-08-16T01:00 in +5:00
-  const r = buildMonthRange(now, 19800);
+  const r = buildUsageRange(now, 19800);
   assert.equal(r.tz, 18000);
   assert.equal(r.todayStart, Date.UTC(2026, 7, 16) / 1000 - 18000);
-  assert.equal(r.start, Date.UTC(2026, 7, 1) / 1000 - 18000);
+  assert.equal(r.end, Date.UTC(2026, 7, 17) / 1000 - 18000);
 });
 
-test('deepseek buildMonthRange clamps 31-day months to a 30-day window', () => {
-  const now = Date.UTC(2026, 7, 31, 12, 0); // Aug 31, tz 0
-  const r = buildMonthRange(now, 0);
-  assert.equal(r.end - r.start, 30 * DAY);
-  assert.equal(r.start, Date.UTC(2026, 7, 2) / 1000); // rolled back from Aug 1
-  assert.equal(r.todayStart, Date.UTC(2026, 7, 31) / 1000);
-});
-
-test('deepseek buildMonthRange handles month rollover (day 1)', () => {
+test('deepseek buildUsageRange rolls back across month boundaries', () => {
   const now = Date.UTC(2026, 8, 1, 0, 30); // Sep 1 00:30, tz 0
-  const r = buildMonthRange(now, 0);
-  assert.equal(r.start, Date.UTC(2026, 8, 1) / 1000);
+  const r = buildUsageRange(now, 0);
   assert.equal(r.end, Date.UTC(2026, 8, 2) / 1000);
+  assert.equal(r.start, Date.UTC(2026, 8, 2) / 1000 - 30 * DAY); // Aug 3
 });
 
 // ---- OpenRouter --------------------------------------------------------------
@@ -297,10 +285,12 @@ test('openrouter parseCredits computes remaining and breakdown', () => {
   const { balances } = parseCredits(openrouterBody);
   assert.equal(balances.length, 1);
   assert.equal(balances[0].currency, 'USD');
-  assert.equal(balances[0].total, 74.75); // 100.5 - 25.75
+  assert.equal(balances[0].total, 74.75); // 100.5 - 25.75 (headline = remaining)
+  // Parts are the breakdown only — remaining is the headline, not a row.
   const labels = balances[0].parts.map((p) => p.label);
-  assert.deepEqual(labels, ['Purchased', 'Used', 'Remaining']);
-  assert.equal(balances[0].parts[2].value, 74.75);
+  assert.deepEqual(labels, ['Purchased', 'Used']);
+  assert.equal(balances[0].parts[0].value, 100.5);
+  assert.equal(balances[0].parts[1].value, 25.75);
 });
 
 test('openrouter parseCredits tolerates missing data', () => {

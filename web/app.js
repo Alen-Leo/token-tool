@@ -5,7 +5,7 @@
   'use strict';
 
   // ---- i18n ----------------------------------------------------------------
-  const { t, setLang, currentLang, detectLang, applyStaticText } = window.TT_I18N;
+  const { t, setLang, currentLang, applyStaticText } = window.TT_I18N;
 
   // ---- session token handling --------------------------------------------
   function initToken() {
@@ -165,55 +165,28 @@
   }
 
   // ---- renderers per provider shape ---------------------------------------
-  // DeepSeek usage-board detail (from the web token): a compact bar chart of
-  // daily spend this month plus per-model and per-API-key breakdowns.
+  // DeepSeek usage-board detail (from the web token): TODAY's token
+  // consumption per model (cache-hit / cache-miss input, output).
   function renderUsageDetail(u) {
     const nodes = [];
 
-    // Daily spend chart. Bars scale to the busiest day; hover shows the exact
-    // figure. Days with no spend keep a hairline baseline.
-    if (Array.isArray(u.daily) && u.daily.length > 1) {
-      const max = Math.max(...u.daily.map((d) => d.cost || 0), 0.000001);
-      const bars = u.daily.map((d) => {
-        const pct = d.cost > 0 ? Math.max(6, Math.round((d.cost / max) * 100)) : 2;
-        const title = `${d.date} · ${fmtMoney(d.cost, u.currency)}${d.tokens ? ` · ${fmtCompactTokens(d.tokens)} tk` : ''}`;
-        return el('span', { class: `ubar${d.cost > 0 ? '' : ' empty'}`, style: `height:${pct}%`, title });
-      });
-      nodes.push(el('div', { class: 'usage-detail' },
-        el('div', { class: 'meter-row' },
-          el('span', { class: 'label' }, t('ds.dailySpend')),
-          el('span', { class: 'val' }, `${u.daily[0].date} – ${u.daily[u.daily.length - 1].date}`),
-        ),
-        el('div', { class: 'usage-bars' }, ...bars),
-      ));
-    }
-
-    // Per-model rows: cost headline, tokens/requests sub-line.
+    // Per-model rows: today's token usage breakdown. Models with no usage
+    // today are omitted by the server.
     if (Array.isArray(u.models) && u.models.length) {
       nodes.push(el('div', { class: 'usage-detail' },
-        el('div', { class: 'meter-row' }, el('span', { class: 'label' }, t('ds.byModel'))),
+        el('div', { class: 'meter-row' }, el('span', { class: 'label' }, t('ds.byModelToday'))),
         ...u.models.map((m) => el('div', { class: 'usage-model' },
           el('div', { class: 'meter-row' },
-            el('span', { class: 'label model-name', title: m.model }, m.model),
-            el('span', { class: 'val' }, fmtMoney(m.cost, u.currency)),
-          ),
-          el('div', { class: 'model-sub' },
-            `${t('ds.requests', fmtTokens(m.requests))} · `,
-            `${t('ds.tokIn', fmtCompactTokens(m.inputTokens))} · `,
-            `${t('ds.tokCache', fmtCompactTokens(m.cacheHitTokens))} · `,
-            t('ds.tokOut', fmtCompactTokens(m.outputTokens)),
-          ),
-        )),
-      ));
-    }
-
-    // Per-API-key rows (the official usage table's grouping).
-    if (Array.isArray(u.keys) && u.keys.length) {
-      nodes.push(el('div', { class: 'usage-detail' },
-        el('div', { class: 'meter-row' }, el('span', { class: 'label' }, t('ds.byKey'))),
-        ...u.keys.map((k) => el('div', { class: 'meter-row' },
-          el('span', { class: 'label model-name', title: k.name }, k.name),
-          el('span', { class: 'val' }, fmtMoney(k.cost, u.currency)),
+            el('span', { class: 'label model-name', title: m.model }, m.model)),
+          el('div', { class: 'meter-row' },
+            el('span', { class: 'label' }, t('ds.tokCacheHit')),
+            el('span', { class: 'val' }, fmtCompactTokens(m.todayCacheHitTokens))),
+          el('div', { class: 'meter-row' },
+            el('span', { class: 'label' }, t('ds.tokCacheMiss')),
+            el('span', { class: 'val' }, fmtCompactTokens(m.todayInputTokens))),
+          el('div', { class: 'meter-row' },
+            el('span', { class: 'label' }, t('ds.tokOut')),
+            el('span', { class: 'val' }, fmtCompactTokens(m.todayOutputTokens))),
         )),
       ));
     }
@@ -273,7 +246,8 @@
       body.push(el('p', { class: 'card-sub' }, `⚠ ${r.error}`));
     }
 
-    // At-a-glance human summary (z.ai, deepseek, opencode, new providers).
+    // At-a-glance human summary (z.ai, deepseek, …). OpenCode sends no
+    // summary — its usage windows below carry all the info.
     if (r.summary && r.status === 'ok') {
       body.push(el('p', { class: 'card-summary' }, r.summary));
     }
@@ -291,43 +265,24 @@
       ));
     }
 
-    // Balances (deepseek, openrouter, siliconflow, moonshot)
+    // Balances (deepseek, openrouter, siliconflow, moonshot): big headline
+    // number, breakdown rows (label left, value right) below it. DeepSeek's
+    // rows also carry today / last-30-day spend, merged into the same block.
     if (Array.isArray(r.balances) && r.balances.length) {
       const blocks = r.balances.map((b) => {
-        // Generic parts breakdown when present; fall back to deepseek's
-        // legacy granted/toppedUp fields otherwise.
-        let partsNodes;
-        if (Array.isArray(b.parts) && b.parts.length) {
-          partsNodes = b.parts.map((p) =>
-            el('div', {}, el('span', { class: 'parts-label' }, `${p.label}:`), ` ${fmtMoney(p.value, b.currency)}`));
-        } else {
-          partsNodes = [];
-          if (b.granted != null) partsNodes.push(el('div', {}, `${t('card.granted')} ${fmtMoney(b.granted, b.currency)}`));
-          if (b.toppedUp != null) partsNodes.push(el('div', {}, `${t('card.toppedUp')} ${fmtMoney(b.toppedUp, b.currency)}`));
-        }
+        const partsNodes = (Array.isArray(b.parts) ? b.parts : []).map((p) =>
+          el('div', { class: 'meter-row' },
+            el('span', { class: 'label' }, p.label),
+            el('span', { class: 'val' }, fmtMoney(p.value, p.currency || b.currency))));
         return el('div', { class: 'balance' },
           el('div', { class: 'balance-main' },
             el('span', { class: 'amount' }, fmtMoney(b.total, b.currency)),
             el('span', { class: 'currency' }, b.currency)),
-          el('div', { class: 'parts' }, ...partsNodes),
+          partsNodes.length ? el('div', { class: 'parts' }, ...partsNodes) : null,
         );
       });
       body.push(el('div', { class: 'balances' }, ...blocks));
       if (r.isAvailable === false) body.push(el('span', { class: 'badge warn' }, t('card.insufficientBalance')));
-    }
-
-    // Usage parts (DeepSeek web token: cumulative spend, monthly, token usage).
-    if (Array.isArray(r.usageParts) && r.usageParts.length) {
-      const rows = r.usageParts.map((p) => {
-        const valText = p.unit === 'tokens'
-          ? fmtTokens(p.value)
-          : fmtMoney(p.value, p.currency || 'USD');
-        return el('div', { class: 'meter-row' },
-          el('span', { class: 'label' }, p.label),
-          el('span', { class: 'val' }, valText),
-        );
-      });
-      body.push(el('div', { class: 'usage-parts' }, ...rows));
     }
 
     // DeepSeek usage-board detail: daily spend chart + per-model / per-key
@@ -779,17 +734,12 @@
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
 
   async function boot() {
-    // Apply the persisted language (falls back to the browser's language).
+    // Apply the persisted language; fresh installs (no config yet) default to
+    // Chinese. The server always echoes a valid lang, so no detection is needed.
     try {
       const cfg = await api('/api/config');
       state.config = cfg;
-      let lang = cfg.ui?.lang || '';
-      if (lang !== 'zh' && lang !== 'en') {
-        lang = detectLang();
-        // Persist the detected language so all windows agree on the first paint.
-        api('/api/config', { method: 'POST', body: JSON.stringify({ ui: { lang } }) }).catch(() => {});
-      }
-      setLang(lang);
+      setLang(cfg.ui?.lang || 'zh');
       if (Array.isArray(cfg.ui?.order)) state.order = cfg.ui.order;
     } catch { /* no config yet — defaults */ }
     applyStaticText();

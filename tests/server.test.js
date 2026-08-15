@@ -110,11 +110,11 @@ test('config GET masks keys and never returns raw secrets', async () => {
   }
 });
 
-test('config GET returns ui prefs (default en, empty order)', async () => {
+test('config GET returns ui prefs (default zh, empty order)', async () => {
   const res = await authed('/api/config');
   const body = await res.json();
   assert.ok(body.ui);
-  assert.equal(body.ui.lang, 'en');
+  assert.equal(body.ui.lang, 'zh');
   assert.deepEqual(body.ui.order, []);
 });
 
@@ -158,6 +158,29 @@ test('config POST rejects unsupported ui.lang values', async () => {
   const body = await res.json();
   // Unsupported values are ignored — the previously persisted 'zh' is kept.
   assert.equal(body.ui.lang, 'zh');
+});
+
+test('config POST with a provider but no fields is a no-op, not a 500', async () => {
+  // Regression: provider-only bodies used to crash on
+  // hasOwnProperty.call(undefined, …) and surface as 500.
+  const res = await authed('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: 'zai' }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.providers.zai.hasKey, false);
+});
+
+test('config POST rejects non-object fields with 400 invalid fields', async () => {
+  const res = await authed('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: 'zai', fields: 'oops' }),
+  });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'invalid fields');
 });
 
 test('static index.html is served at /', async () => {

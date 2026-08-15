@@ -31,6 +31,7 @@ import {
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from '../src/server.js';
+import { loadConfig } from '../src/config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -293,6 +294,17 @@ function createPopover() {
 
   popover = new BrowserWindow({ ...common, ...macOpts });
 
+  // The popover must float above other apps' windows. This is a menu-bar app
+  // that is almost never the active app, so a plain show()/focus() can leave
+  // the window BEHIND whatever covers that screen area — a hover "doesn't
+  // open" because it opens unseen. 'pop-up-menu' is the level designed for
+  // menus/popovers (above normal windows, below system dialogs); Windows
+  // only supports 'floating'. visibleOnFullScreen additionally surfaces the
+  // preview over a fullscreen app.
+  popover.setAlwaysOnTop(true, IS_MAC ? 'pop-up-menu' : 'floating');
+  if (IS_MAC) popover.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  popover.moveTop();
+
   hardenWindow(popover.webContents);
 
   // Hide on blur — menu-bar / tray popover semantics. Debounced (not instant)
@@ -363,25 +375,28 @@ function refreshData() {
 }
 
 // ---- tray ------------------------------------------------------------------
+// The tray context menu follows the configured UI language, like the web UI.
+// It is rebuilt on every right-click, so a language change applies immediately.
 function buildContextMenu() {
+  const zh = loadConfig().ui?.lang === 'zh';
   const items = [];
   if (!IS_MAC) {
     // Windows/Linux have a real main window; macOS is menu-bar-only.
-    items.push({ label: 'Open main window', click: () => showMainWindow() });
+    items.push({ label: zh ? '打开主窗口' : 'Open main window', click: () => showMainWindow() });
   }
-  items.push({ label: 'Refresh data', click: () => refreshData() });
+  items.push({ label: zh ? '刷新数据' : 'Refresh data', click: () => refreshData() });
   items.push({
-    label: 'Open in browser',
+    label: zh ? '在浏览器中打开' : 'Open in browser',
     click: () => shell.openExternal(serverHandle.launchUrl).catch(() => {}),
   });
   items.push({ type: 'separator' });
-  items.push({ label: 'Quit token-tool', click: () => quit() });
+  items.push({ label: zh ? '退出 token-tool' : 'Quit token-tool', click: () => quit() });
   return Menu.buildFromTemplate(items);
 }
 
 function createTray() {
   tray = new Tray(buildTrayIcon());
-  tray.setToolTip('token-tool — AI subscriptions & usage');
+  tray.setToolTip(loadConfig().ui?.lang === 'zh' ? 'token-tool — AI 订阅与用量监控' : 'token-tool — AI subscriptions & usage');
 
   // Hovering the tray icon proactively shows the popover (after a short dwell
   // so a sweeping mouse doesn't flash it open). Moving away hides it (handled
@@ -406,21 +421,24 @@ function createTray() {
     if (popover && popover.isVisible()) scheduleHide(400);
   });
 
-  // Left click toggles the popover. On Windows/Linux the toggle is deferred
-  // briefly so a double-click can win and open the main window instead —
-  // otherwise a double-click fires click→click→double-click and flashes the
-  // popover open then shut.
+  // Left click shows the popover. Hovering already previews it, so the click
+  // pins it open rather than toggling it shut — a toggle would fight the
+  // hover-show and the preview would close the instant the user clicks.
+  // Dismissal is handled by the proximity watch and blur (clicking elsewhere).
+  // On Windows/Linux the show is deferred briefly so a double-click can win
+  // and open the main window instead — otherwise a double-click fires
+  // click→click→double-click and flashes the popover open then shut.
   tray.on('click', () => {
     cancelPendingShow();
     cancelPendingHide();
     if (IS_MAC) {
-      togglePopover();
+      showPopover();
       return;
     }
     if (pendingClickToggle) clearTimeout(pendingClickToggle);
     pendingClickToggle = setTimeout(() => {
       pendingClickToggle = null;
-      togglePopover();
+      showPopover();
     }, 260);
   });
   // Double-click re-opens the main window (Windows/Linux only).
@@ -438,17 +456,18 @@ function createTray() {
   });
 }
 
-function togglePopover() {
+// Show (and pin) the popover. Clicking the tray icon always opens it — hover
+// has already auto-shown it in most cases, so a toggle would close a preview
+// the user just asked to see. Closing is left to blur and the proximity watch.
+function showPopover() {
   cancelPendingShow();
   cancelPendingHide();
   if (!popover) createPopover();
-  if (popover.isVisible()) {
-    popover.hide();
-    return;
+  if (!popover.isVisible()) {
+    const b = popoverBoundsFor(tray, POPOVER_WIDTH, POPOVER_HEIGHT);
+    popover.setBounds(b);
+    popover.show();
   }
-  const b = popoverBoundsFor(tray, POPOVER_WIDTH, POPOVER_HEIGHT);
-  popover.setBounds(b);
-  popover.show();
   popover.focus();
 }
 
@@ -503,7 +522,7 @@ function showMainWindow() {
 // Opens a login window for platform.deepseek.com. When the user logs in, the
 // SPA writes the session token to localStorage under "userToken" (JSON shape
 // {value: "<token>", __version: "0"}). We poll that key and resolve the token.
-// Runs in an IN-MORY session partition so captured tokens/cookies never persist
+// Runs in an IN-MEMORY session partition so captured tokens/cookies never persist
 // to disk — the token is carried over via the 0600 config.json instead.
 
 function openDeepSeekLogin() {
@@ -591,7 +610,7 @@ async function bootstrap() {
     // the first launch path already surfaces a window.
     if (!serverHandle) return;
     if (IS_MAC) {
-      if (popover && !popover.isVisible()) togglePopover();
+      showPopover();
     } else {
       showMainWindow();
     }
@@ -663,12 +682,12 @@ async function bootstrap() {
   // be captured/screenshotted without a manual tray click. Harmless in prod —
   // the popover still hides on blur and re-opens on tray click.
   if (process.env.TOKEN_TOOL_AUTO_SHOW === '1') {
-    setTimeout(() => togglePopover(), 800);
+    setTimeout(() => showPopover(), 800);
   }
 
   app.on('activate', () => {
     // macOS: re-open popover when the user clicks the icon / re-activates.
-    if (popover && !popover.isVisible()) togglePopover();
+    showPopover();
   });
 }
 

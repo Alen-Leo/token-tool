@@ -58,9 +58,9 @@ test('loadConfig tolerates missing/malformed file', () => {
 
 test('ui prefs (lang/order) round-trip through save/load with defaults', () => {
   const dir = tmpDir();
-  // Defaults on a fresh config.
+  // Defaults on a fresh config — Chinese by default.
   const fresh = loadConfig(dir);
-  assert.equal(fresh.ui.lang, 'en');
+  assert.equal(fresh.ui.lang, 'zh');
   assert.deepEqual(fresh.ui.order, []);
 
   // Persist a language + order, then reload.
