@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <title>token-tool</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Ctext x='16' y='22' font-size='18' text-anchor='middle' fill='white' font-family='system-ui'%3E%CE%BB%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">λ</span>
+        <div>
+          <h1>token-tool</h1>
+          <p class="subtitle" data-i18n="html.subtitle">AI platform subscriptions &amp; usage · local-only</p>
+        </div>
+      </div>
+      <div class="actions">
+        <span id="updated" class="updated muted" aria-live="polite"></span>
+        <button id="refresh" class="btn" title="Refresh now" data-i18n="html.refresh">↻ Refresh</button>
+        <button id="settings" class="btn btn-ghost" title="Settings" data-i18n="html.settings">⚙ Settings</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="grid" class="grid" aria-label="Providers"></section>
+      <p id="empty" class="empty hidden" data-i18n="html.empty">No active subscriptions to show. Add API keys or fix invalid keys in <strong>⚙ Settings</strong>.</p>
+    </main>
+
+    <footer class="footer muted" data-i18n="html.footer">
+      <span>Bound to 127.0.0.1 · keys stored locally (0600) · outbound limited to known hosts</span>
+    </footer>
+
+    <!-- Settings modal -->
+    <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-card">
+        <header class="modal-head">
+          <h2 id="modal-title" data-i18n="html.modalTitle">API Keys</h2>
+          <button id="modal-close" class="btn btn-icon" aria-label="Close" data-i18n="html.modalClose">✕</button>
+        </header>
+        <div id="settings-body" class="modal-body"></div>
+        <footer class="modal-foot">
+          <span class="muted small" data-i18n="html.modalFoot">Keys are saved to <code>~/.token-tool/config.json</code> (owner-only).</span>
+          <button id="modal-done" class="btn btn-primary" data-i18n="html.modalDone">Done</button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="/i18n.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

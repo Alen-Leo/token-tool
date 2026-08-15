@@ -1,0 +1,26 @@
+# Local secrets — NEVER commit. API keys live here with 0600 perms.
+config/local.json
+.env
+.env.*
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Runtime / build artifacts
+dist/
+*.log
+.DS_Store
+
+# Local dev/test scratch files — may contain the per-launch session token
+.tt-*.txt
+.tt-*.log
+
+# OS
+Thumbs.db
+
+# ZCode toolchain scratch (session plans)
+.zcode/
+
+# Build cache (never track)
+.cache-ds/
