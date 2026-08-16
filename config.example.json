@@ -3,24 +3,53 @@
   "openBrowser": true,
   "providers": {
     "zai": {
-      "apiKey": "REPLACE_WITH_YOUR_ZAI_OR_GLM_API_KEY",
-      "region": "global"
+      "accounts": [
+        {
+          "id": "default",
+          "label": "工作账号",
+          "apiKey": "REPLACE_WITH_YOUR_ZAI_OR_GLM_API_KEY",
+          "region": "global"
+        },
+        {
+          "id": "ab12cd",
+          "label": "个人账号",
+          "apiKey": "REPLACE_WITH_A_SECOND_ZAI_API_KEY",
+          "region": "bigmodel-cn"
+        }
+      ]
     },
     "deepseek": {
-      "apiKey": "REPLACE_WITH_YOUR_DEEPSEEK_API_KEY"
+      "accounts": [
+        {
+          "id": "default",
+          "apiKey": "REPLACE_WITH_YOUR_DEEPSEEK_API_KEY",
+          "webToken": "OPTIONAL_platform_deepseek_com_userToken"
+        }
+      ]
     },
     "opencode": {
-      "apiKey": "REPLACE_WITH_YOUR_OPENCODE_GO_API_KEY"
+      "accounts": [
+        { "id": "default", "apiKey": "REPLACE_WITH_YOUR_OPENCODE_GO_API_KEY" }
+      ]
     },
     "openrouter": {
-      "apiKey": "REPLACE_WITH_YOUR_OPENROUTER_API_KEY"
+      "accounts": [
+        { "id": "default", "apiKey": "REPLACE_WITH_YOUR_OPENROUTER_API_KEY" }
+      ]
     },
     "siliconflow": {
-      "apiKey": "REPLACE_WITH_YOUR_SILICONFLOW_API_KEY"
+      "accounts": [
+        { "id": "default", "apiKey": "REPLACE_WITH_YOUR_SILICONFLOW_API_KEY" }
+      ]
     },
     "moonshot": {
-      "apiKey": "REPLACE_WITH_YOUR_MOONSHOT_OR_KIMI_API_KEY",
-      "region": "moonshot-cn"
+      "accounts": [
+        {
+          "id": "default",
+          "apiKey": "REPLACE_WITH_YOUR_MOONSHOT_OR_KIMI_API_KEY",
+          "region": "moonshot-cn"
+        }
+      ]
     }
   }
 }

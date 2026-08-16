@@ -276,9 +276,10 @@ export async function fetch({ config, lang = 'en' }) {
       const primary = balances[0] || null;
       // Track spend only on real queries — the /api/test route passes
       // skipSpendTrack so a Test (which may use a different account's key)
-      // never mutates the persisted spend baseline.
+      // never mutates the persisted spend baseline. Spend is scoped per
+      // account so two DeepSeek keys keep independent baselines.
       if (primary && primary.toppedUp != null && !config?.skipSpendTrack) {
-        spend = trackBalance(meta.id, primary.currency, primary.toppedUp);
+        spend = trackBalance(`${meta.id}:${config?.accountId || 'default'}`, primary.currency, primary.toppedUp);
       }
     } catch (err) {
       apiError = errorText(err, lang);

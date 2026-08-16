@@ -5,12 +5,16 @@
 // paid balance, we can attribute a balance drop-down to local spend:
 //   spentSinceLastPoll = max(0, lastSeenPaid - currentPaid)
 // We accumulate that into today's / this month's / all-time buckets, keyed by
-// the provider id and currency. A top-up (balance going UP) resets the baseline
+// provider:account and currency, so multiple accounts of one provider keep
+// independent baselines. A top-up (balance going UP) resets the baseline
 // without counting as spend.
 //
 // Storage lives in the config dir (~/.token-tool/) as spend.json and is shared
 // across the server + desktop shell (same process). It is NOT secrets — only
-// rounded spend totals — but it still only references provider ids/currencies.
+// rounded spend totals — but it still only references account ids/currencies.
+// Legacy entries written before multi-account support used 2-segment keys
+// ("provider:currency"); they are migrated in place to
+// "provider:default:currency" on first read.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,14 +33,24 @@ function spendPath() {
   return path.join(configDir(), FILENAME);
 }
 
+// Read the store, upgrading pre-multi-account 2-segment keys
+// ("provider:currency") to 3-segment ones ("provider:default:currency").
 function readStore() {
+  let parsed;
   try {
-    const raw = fs.readFileSync(spendPath(), 'utf8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    parsed = JSON.parse(fs.readFileSync(spendPath(), 'utf8'));
   } catch {
     return {};
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  for (const [key, value] of Object.entries(parsed)) {
+    const parts = key.split(':');
+    if (parts.length === 2 && value && typeof value === 'object') {
+      delete parsed[key];
+      parsed[`${parts[0]}:default:${parts[1]}`] = value;
+    }
+  }
+  return parsed;
 }
 
 function writeStore(store) {
@@ -79,13 +93,15 @@ function pruneEntry(entry, now) {
   }
 }
 
-// Record a balance observation for a provider+currency. Returns the derived
-// spend snapshot (today/month/allTime) AFTER incorporating this observation.
+// Record a balance observation for one account of a provider. `accountKey` is
+// "provider:accountId" (see providers/index.js — always account-scoped now).
+// Returns the derived spend snapshot (today/month/allTime) AFTER incorporating
+// this observation.
 //   paidBalance: the TOPPED-UP (paid-in) balance — drops as you spend, climbs
 //                when you top up. We track spend as decreases in this number.
-export function trackBalance(providerId, currency, paidBalance) {
+export function trackBalance(accountKey, currency, paidBalance) {
   const store = readStore();
-  const key = `${providerId}:${currency}`;
+  const key = `${accountKey}:${currency}`;
   const now = new Date();
   const dk = dayKey(now);
   const mk = monthKey(now);

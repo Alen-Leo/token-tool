@@ -44,6 +44,8 @@ node src/server.js            # macOS / Linux 也可：./scripts/run.sh
 - **界面**——点击 **⚙ 配置**，粘贴密钥，**Test**（实时探测，不保存），再 **Save**。
 - **文件**——把 `config.example.json` 复制为 `~/.token-tool/config.json`（权限 `0600`）后编辑。或者用环境变量：
 
+每个服务商都支持**多个账号**（比如两个 z.ai 账号）：界面里点服务商卡片内的「＋ 添加账号」即可追加，可给每个账号加备注（如「工作」）区分；文件里则是 `providers.<id>.accounts` 数组（见 `config.example.json`）。旧版单密钥格式（密钥直接写在 `providers.<id>` 上）仍然兼容，首次保存后自动迁移。每个账号一张卡片，可各自拖动排序。
+
 ```bash
 export ZAI_API_KEY=...            # 或 GLM_API_KEY / ZHIPU_API_KEY
 export DEEPSEEK_API_KEY=...

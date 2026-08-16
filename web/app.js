@@ -224,15 +224,22 @@
     });
   }
 
-  function renderCard(r) {
+  function renderCard(r, showAccountBadge) {
     const dotCls = r.status === 'ok' ? 'ok' : r.status === 'notConfigured' ? '' : 'err';
     const regionLabel = ({ 'bigmodel-cn': 'CN', 'moonshot-cn': 'CN', global: '' })[r.region] || (r.region ? r.region : '');
+    // Account badge: distinguishes cards when a provider has several accounts.
+    // Prefer the user label; fall back to the masked key's tail.
+    const badgeText = r.accountLabel || (r.accountMask ? `…${r.accountMask.slice(-3)}` : '');
+    const accountBadge = showAccountBadge && badgeText
+      ? el('span', { class: 'badge muted account', title: t('card.account.title', r.accountLabel || r.accountMask) }, badgeText)
+      : null;
     const head = el('div', { class: 'card-head' },
       el('div', { class: 'card-title' },
         el('span', { class: `dot ${dotCls}`, 'aria-hidden': 'true' }),
         el('span', {}, r.name),
       ),
       el('div', { class: 'head-badges' },
+        accountBadge,
         regionLabel ? el('span', { class: 'badge muted', title: t('card.region.title', r.region) }, regionLabel) : null,
         statusBadge(r.status),
       ),
@@ -318,21 +325,40 @@
       el('span', {}, relativeFrom(r.updatedAt) ? t('card.updated', relativeFrom(r.updatedAt)) : ''),
     );
 
-    return el('div', { class: 'card', 'data-provider': r.provider, title: t('card.dragHint') }, head, ...body, foot);
+    return el('div', { class: 'card', 'data-provider': r.provider, 'data-card': `${r.provider}:${r.accountId || 'default'}`, title: t('card.dragHint') }, head, ...body, foot);
   }
 
   function render() {
     const grid = document.getElementById('grid');
     grid.innerHTML = '';
-    // Card order: persisted user order when set, else the provider registry order.
-    const order = state.order.length ? state.order : state.meta.map((m) => m.id);
-    // Only render cards that actually show subscription data: skip providers
+    // Only render cards that actually show subscription data: skip accounts
     // with no key (notConfigured) or an invalid/expired key (unauthorized).
     const HIDDEN = new Set(['notConfigured', 'unauthorized']);
-    const sorted = [...state.results]
-      .filter((r) => !HIDDEN.has(r.status))
-      .sort((a, b) => order.indexOf(a.provider) - order.indexOf(b.provider));
-    for (const r of sorted) grid.appendChild(renderCard(r));
+    const visible = state.results.filter((r) => !HIDDEN.has(r.status));
+    // Providers with more than one visible card get account badges.
+    const counts = {};
+    for (const r of visible) counts[r.provider] = (counts[r.provider] || 0) + 1;
+    // Position of each account among its provider's visible cards (fallback
+    // order for cards not covered by the persisted ui.order).
+    const accountIdx = {};
+    for (const r of visible) {
+      accountIdx[r.provider] = accountIdx[r.provider] || {};
+      accountIdx[r.provider][r.accountId || 'default'] = Object.keys(accountIdx[r.provider]).length;
+    }
+    // Sort key: exact card entry ('zai:a1b2c3') wins; a bare provider entry
+    // ('zai') groups all its cards right after it; anything unlisted falls
+    // back to registry order, accounts in config order.
+    const sortIndex = (r) => {
+      const key = `${r.provider}:${r.accountId || 'default'}`;
+      const i = state.order.indexOf(key);
+      if (i !== -1) return i;
+      const p = state.order.indexOf(r.provider);
+      if (p !== -1) return p + 0.5;
+      const reg = state.meta.findIndex((m) => m.id === r.provider);
+      return 10_000 + reg * 100 + (accountIdx[r.provider]?.[r.accountId || 'default'] || 0);
+    };
+    const sorted = [...visible].sort((a, b) => sortIndex(a) - sortIndex(b));
+    for (const r of sorted) grid.appendChild(renderCard(r, counts[r.provider] > 1));
     // Empty state: nothing configured OR all keys invalid/expired.
     const hasAny = sorted.length > 0;
     document.getElementById('empty').classList.toggle('hidden', hasAny);
@@ -392,7 +418,7 @@
       dragActive = false;
       flushPendingRender();
       if (!moved) return; // never crossed the threshold → a plain click
-      const order = [...grid.querySelectorAll('.card')].map((c) => c.dataset.provider);
+      const order = [...grid.querySelectorAll('.card')].map((c) => c.dataset.card);
       state.order = order;
       api('/api/config', { method: 'POST', body: JSON.stringify({ ui: { order } }) })
         .then((cfg) => { state.config = cfg; })
@@ -505,6 +531,266 @@
   }
 
   // ---- settings modal -----------------------------------------------------
+  // One editor per ACCOUNT of each provider. Providers with no accounts yet
+  // show a single "first account" editor (saving creates the default account)
+  // to keep the single-account flow exactly as simple as before.
+  function buildAccountSection(m, { mode, account = null, multi = false, onStructureChange = () => {} }) {
+    // mode: 'first' (provider empty — save creates the default account),
+    //       'new' (adding another account), 'existing'.
+    const isEnv = account?.id === 'env';
+    const showLabel = mode !== 'first' && !isEnv; // label only matters once there are ≥2
+    const wrap = el('div', { class: 'account-wrap' });
+
+    // Section header + remove/cancel — only when there is something to
+    // distinguish (several accounts) or an unsaved new form to cancel.
+    if (mode === 'new' || (mode === 'existing' && multi)) {
+      const title = mode === 'new'
+        ? t('settings.newAccount')
+        : (account.label || account.keyMask || account.webTokenMask || account.id);
+      const head = el('div', { class: 'account-head' }, el('span', { class: 'account-name' }, title));
+      if (!isEnv) {
+        const x = el('button', { class: 'btn btn-icon account-remove', title: t('settings.removeAccount'), 'aria-label': t('settings.removeAccount') }, '✕');
+        x.addEventListener('click', async () => {
+          if (mode === 'new') { wrap.remove(); return; }
+          if (!window.confirm(t('settings.removeConfirm'))) return;
+          try {
+            state.config = await api('/api/config', { method: 'POST', body: JSON.stringify({ provider: m.id, removeAccount: account.id }) });
+            onStructureChange(); // rebuild this provider's fieldset in place
+            loadAll();
+          } catch (e) {
+            out.textContent = t('settings.testErr', e.message); out.className = 'test-out err';
+          }
+        });
+        head.appendChild(x);
+      }
+      wrap.appendChild(head);
+    }
+
+    const inputs = {}; // fieldKey → DOM input/select
+    const regionLabels = {
+      global: t('settings.region.global'),
+      'bigmodel-cn': t('settings.region.bigmodelCn'),
+      'moonshot-cn': t('settings.region.moonshotCn'),
+    };
+    const fieldPlaceholders = {
+      apiKey: { savedKey: 'hasKey', maskKey: 'keyMask', ph: t('settings.ph.pasteApiKey') },
+      webToken: { savedKey: 'hasWebToken', maskKey: 'webTokenMask', ph: t('settings.ph.pasteWebToken') },
+    };
+
+    for (const f of m.configFields) {
+      if (f.type === 'select') {
+        const sel = el('select', { title: f.label },
+          ...f.options.map((opt) => el('option', { value: opt }, regionLabels[opt] || opt)),
+        );
+        sel.value = account?.region || f.default || f.options[0];
+        inputs[f.key] = sel;
+      } else {
+        const fp = fieldPlaceholders[f.key] || {};
+        const saved = account?.[fp.savedKey];
+        const mask = account?.[fp.maskKey];
+        const inputEl = el('input', {
+          type: f.type === 'password' ? 'password' : 'text',
+          placeholder: saved ? t('settings.saved', mask) : (f.hint || fp.ph || t('settings.ph.pasteValue')),
+          autocomplete: 'off',
+          title: f.hint || '',
+        });
+        if (f.hint) inputEl.title = f.hint;
+        // Mark the field as "cleared" when the user empties it, so Save can
+        // send an empty value (server deletes the stored key/token).
+        inputEl.addEventListener('input', () => {
+          if (inputEl.value.trim() === '') inputEl.dataset.cleared = '1';
+          else delete inputEl.dataset.cleared;
+        });
+        inputs[f.key] = inputEl;
+      }
+    }
+
+    if (showLabel) {
+      const li = el('input', { type: 'text', placeholder: t('settings.ph.accountLabel'), autocomplete: 'off', maxlength: '24' });
+      li.value = account?.label || '';
+      inputs.label = li;
+    }
+
+    const labelFor = (key) => ({ apiKey: t('settings.label.apiKey'), webToken: t('settings.label.webToken'), region: t('settings.label.region'), label: t('settings.label.label') }[key] || key);
+    const fieldKeys = [...m.configFields.map((f) => f.key), ...(showLabel ? ['label'] : [])];
+    for (const key of fieldKeys) {
+      const fieldEl = inputs[key];
+      if (!fieldEl) continue;
+      wrap.appendChild(el('div', { class: 'field-row' },
+        el('span', { class: 'field-label' }, labelFor(key)),
+        fieldEl,
+      ));
+      const hint = m.configFields.find((f) => f.key === key)?.hint;
+      if (hint) wrap.appendChild(el('p', { class: 'field-hint' }, hint));
+    }
+
+    const btnRow = el('div', { class: 'btn-row' });
+    const out = el('div', { class: 'test-out' });
+    const testBtn = el('button', { class: 'btn' }, t('settings.test'));
+    const saveBtn = el('button', { class: 'btn btn-primary' }, t('settings.save'));
+    btnRow.appendChild(testBtn);
+    if (!isEnv) btnRow.appendChild(saveBtn);
+    else btnRow.appendChild(el('span', { class: 'field-hint', style: 'align-self:center;margin:0' }, t('settings.envAccount')));
+
+    // "授权登录" — providers with a webToken field (DeepSeek). Opens a login
+    // window in the desktop shell; browser mode returns 501 (paste manually).
+    if (m.configFields.some((f) => f.key === 'webToken') && mode === 'existing' && !isEnv) {
+      const authBtn = el('button', { class: 'btn btn-ghost', title: currentLang() === 'zh' ? '打开 DeepSeek 登录窗口 — 自动获取会话 token' : 'Open DeepSeek login in a window — auto-captures the session token' }, '🔑 授权登录');
+      const authOut = el('div', { class: 'test-out small' });
+      btnRow.appendChild(authBtn);
+      wrap.appendChild(authOut);
+      authBtn.addEventListener('click', async () => {
+        authOut.textContent = currentLang() === 'zh' ? '正在打开登录窗口…' : 'opening login window…'; authOut.className = 'test-out small';
+        try {
+          const r = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ provider: m.id }) });
+          if (r.ok && r.token) {
+            // Save the captured token as THIS account's webToken, then refresh.
+            state.config = await api('/api/config', { method: 'POST', body: JSON.stringify({ provider: m.id, accountId: account.id, fields: { webToken: r.token } }) });
+            if (inputs.webToken) {
+              inputs.webToken.value = '';
+              const updated = (state.config.providers[m.id]?.accounts || []).find((a) => a.id === account.id) || {};
+              inputs.webToken.placeholder = updated.hasWebToken ? t('settings.saved', updated.webTokenMask) : t('settings.ph.pasteWebToken');
+              delete inputs.webToken.dataset.cleared;
+            }
+            authOut.textContent = currentLang() === 'zh' ? '✓ 登录成功，已保存 web token' : '✓ Login OK, web token saved'; authOut.className = 'test-out small ok';
+            loadAll();
+          } else if (r.status) {
+            authOut.textContent = t('settings.login.errStatus', r.status, r.error || 'failed'); authOut.className = 'test-out small err';
+          } else {
+            authOut.textContent = currentLang() === 'zh' ? `✗ ${r.message || '未能获取 token，请手动粘贴'}` : `✗ ${r.message || 'could not get token — paste manually'}`; authOut.className = 'test-out small err';
+          }
+        } catch (e) {
+          // 501 = not available (browser mode); instruct manual paste.
+          const msg = e.status === 501
+            ? (currentLang() === 'zh' ? '⚠ 桌面端可用一键登录；浏览器模式请手动粘贴 web token' : '⚠ One-click login is desktop-only; paste the web token manually in browser mode')
+            : `✗ ${e.message}`;
+          authOut.textContent = msg; authOut.className = 'test-out small err';
+        }
+      });
+    }
+
+    wrap.appendChild(btnRow);
+    wrap.appendChild(out);
+
+    // Collect changed field values from the inputs.
+    const collectFields = () => {
+      const fields = {};
+      for (const f of m.configFields) {
+        if (f.type === 'select') {
+          if (inputs[f.key]) fields[f.key] = inputs[f.key].value;
+        } else {
+          const v = inputs[f.key].value.trim();
+          if (v) fields[f.key] = v;
+          else if (inputs[f.key].dataset.cleared === '1') fields[f.key] = ''; // allow clearing
+        }
+      }
+      if (inputs.label) {
+        const v = inputs.label.value.trim();
+        if (v !== (account?.label || '')) fields.label = v; // '' removes the label
+      }
+      return fields;
+    };
+
+    testBtn.addEventListener('click', async () => {
+      const fields = collectFields();
+      // For providers that need at least one credential (apiKey or webToken).
+      if (!fields.apiKey && !fields.webToken) { out.textContent = t('settings.testEnterKey'); out.className = 'test-out err'; return; }
+      out.textContent = t('settings.testing'); out.className = 'test-out';
+      try {
+        const r = await api(`/api/test/${m.id}?lang=${currentLang()}`, { method: 'POST', body: JSON.stringify({ fields }) });
+        if (r.status === 'ok') {
+          out.textContent = t('settings.testOk', r.summary || t('status.ok'));
+          out.className = 'test-out ok';
+        } else {
+          // Show the localized status label instead of the raw English code.
+          const KNOWN = ['ok', 'unauthorized', 'sourceRateLimited', 'timeout', 'unavailable', 'notConfigured', 'blockedHost'];
+          const label = KNOWN.includes(r.status) ? t(`status.${r.status}`) : r.status;
+          // The server error already carries the label + HTTP code (e.g. 「未授权 (401)」) —
+          // prefer it directly to avoid 「未授权 — 未授权 (401)」.
+          const text = r.error ? (r.error.startsWith(label) ? r.error : `${label} — ${r.error}`) : label;
+          out.textContent = t('settings.testErr', text);
+          out.className = 'test-out err';
+        }
+      } catch (e) {
+        out.textContent = t('settings.testErr', e.message);
+        out.className = 'test-out err';
+      }
+    });
+
+    if (!isEnv) {
+      saveBtn.addEventListener('click', async () => {
+        const fields = collectFields();
+        if (!Object.keys(fields).length) { out.textContent = t('settings.nothingToSave'); out.className = 'test-out err'; return; }
+        // A new account is pointless without a credential — region/label alone
+        // would just create a hidden notConfigured card.
+        if (mode !== 'existing' && !fields.apiKey && !fields.webToken) {
+          out.textContent = t('settings.enterKeyToSave'); out.className = 'test-out err'; return;
+        }
+        const payload = mode === 'first'
+          ? { provider: m.id, fields }
+          : mode === 'new'
+            ? { provider: m.id, addAccount: true, fields }
+            : { provider: m.id, accountId: account.id, fields };
+        saveBtn.disabled = true; // guard against double-click double-add
+        try {
+          state.config = await api('/api/config', { method: 'POST', body: JSON.stringify(payload) });
+          if (mode === 'existing') {
+            // Refresh this section's placeholders in place.
+            const updated = (state.config.providers[m.id]?.accounts || []).find((a) => a.id === account.id) || {};
+            for (const key of Object.keys(inputs)) {
+              if (key === 'label') { inputs.label.value = updated.label || ''; continue; }
+              if (key === 'region') continue;
+              inputs[key].value = '';
+              const fp = fieldPlaceholders[key] || {};
+              const hint = m.configFields.find((f) => f.key === key)?.hint;
+              inputs[key].placeholder = updated[fp.savedKey] ? t('settings.saved', updated[fp.maskKey]) : (hint || fp.ph || t('settings.ph.pasteValue'));
+              delete inputs[key].dataset.cleared;
+            }
+            out.textContent = t('settings.savedOk'); out.className = 'test-out ok';
+          } else {
+            onStructureChange(); // rebuild this provider's fieldset — a new account got its id
+          }
+          loadAll();
+        } catch (e) {
+          out.textContent = t('settings.testErr', e.message); out.className = 'test-out err';
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    }
+
+    return wrap;
+  }
+
+  // One provider's fieldset: all its account editors + the add-account
+  // button. `rebuildProvider` swaps the whole fieldset for a fresh one when an
+  // account is added/removed — scoped, so unsaved edits in OTHER providers'
+  // sections survive.
+  function buildProviderFieldset(m) {
+    const provCfg = state.config.providers[m.id] || {};
+    const accounts = Array.isArray(provCfg.accounts) ? provCfg.accounts : [];
+    const hasWebToken = m.configFields.some((f) => f.key === 'webToken');
+    // Short tag for the header — a quick hint of what this provider shows.
+    const tags = { zai: t('settings.tag.codingPlan'), deepseek: t('settings.tag.balanceUsage'), opencode: t('settings.tag.goPlan'), openrouter: t('settings.tag.credits'), siliconflow: t('settings.tag.balance'), moonshot: t('settings.tag.balance') };
+    const fs = el('div', { class: hasWebToken ? 'fieldset fieldset-wide' : 'fieldset' },
+      el('h3', {}, m.name, el('span', { class: 'tag' }, tags[m.id] || t('settings.tag.api'))),
+    );
+    const rebuildProvider = () => fs.replaceWith(buildProviderFieldset(m));
+
+    if (!accounts.length) {
+      fs.appendChild(buildAccountSection(m, { mode: 'first', onStructureChange: rebuildProvider }));
+    } else {
+      const multi = accounts.length > 1;
+      for (const a of accounts) fs.appendChild(buildAccountSection(m, { mode: 'existing', account: a, multi, onStructureChange: rebuildProvider }));
+      const addBtn = el('button', { class: 'btn btn-ghost add-account' }, t('settings.addAccount'));
+      addBtn.addEventListener('click', () => {
+        fs.insertBefore(buildAccountSection(m, { mode: 'new', multi: true, onStructureChange: rebuildProvider }), addBtn);
+      });
+      fs.appendChild(addBtn);
+    }
+    return fs;
+  }
+
   function openSettings() {
     const body = document.getElementById('settings-body');
     body.innerHTML = '';
@@ -532,190 +818,7 @@
     });
     body.appendChild(langSwitch);
 
-    for (const m of state.meta) {
-      const cfg = state.config.providers[m.id] || {};
-      const hasWebToken = m.configFields.some((f) => f.key === 'webToken');
-      // Short tag for the header — a quick hint of what this provider shows.
-      const tags = { zai: t('settings.tag.codingPlan'), deepseek: t('settings.tag.balanceUsage'), opencode: t('settings.tag.goPlan'), openrouter: t('settings.tag.credits'), siliconflow: t('settings.tag.balance'), moonshot: t('settings.tag.balance') };
-      const fs = el('div', { class: hasWebToken ? 'fieldset fieldset-wide' : 'fieldset' },
-        el('h3', {}, m.name, el('span', { class: 'tag' }, tags[m.id] || t('settings.tag.api'))),
-      );
-
-      // Build inputs generically from configFields — password, select, etc.
-      const inputs = {}; // fieldKey → DOM input element (or select)
-      const regionLabels = {
-        global: t('settings.region.global'),
-        'bigmodel-cn': t('settings.region.bigmodelCn'),
-        'moonshot-cn': t('settings.region.moonshotCn'),
-      };
-      const fieldPlaceholders = {
-        apiKey: { savedKey: 'hasKey', maskKey: 'keyMask', ph: t('settings.ph.pasteApiKey') },
-        webToken: { savedKey: 'hasWebToken', maskKey: 'webTokenMask', ph: t('settings.ph.pasteWebToken') },
-      };
-
-      // Build the input elements first.
-      for (const f of m.configFields) {
-        if (f.type === 'select') {
-          const sel = el('select', { title: f.label },
-            ...f.options.map((opt) => el('option', { value: opt }, regionLabels[opt] || opt)),
-          );
-          sel.value = cfg.region || f.default || f.options[0];
-          inputs[f.key] = sel;
-        } else {
-          // password / text input
-          const fp = fieldPlaceholders[f.key] || {};
-          const saved = cfg[fp.savedKey];
-          const mask = cfg[fp.maskKey];
-          const inputEl = el('input', {
-            type: f.type === 'password' ? 'password' : 'text',
-            placeholder: saved ? t('settings.saved', mask) : (f.hint || fp.ph || t('settings.ph.pasteValue')),
-            autocomplete: 'off',
-            title: f.hint || '',
-          });
-          if (f.hint) inputEl.title = f.hint;
-          // Mark the field as "cleared" when the user empties it, so Save can
-          // send an empty value (server deletes the stored key/token).
-          inputEl.addEventListener('input', () => {
-            if (inputEl.value.trim() === '') inputEl.dataset.cleared = '1';
-            else delete inputEl.dataset.cleared;
-          });
-          inputs[f.key] = inputEl;
-        }
-      }
-
-      // Layout: each credential on its own labeled row, then a single button
-      // row. Region select sits inline with its label too.
-      const labelFor = (key) => ({ apiKey: t('settings.label.apiKey'), webToken: t('settings.label.webToken'), region: t('settings.label.region') }[key] || key);
-
-      for (const f of m.configFields) {
-        const fieldEl = inputs[f.key];
-        if (!fieldEl) continue;
-        const frow = el('div', { class: 'field-row' },
-          el('span', { class: 'field-label' }, labelFor(f.key)),
-          fieldEl,
-        );
-        fs.appendChild(frow);
-        if (f.hint) {
-          fs.appendChild(el('p', { class: 'field-hint' }, f.hint));
-        }
-      }
-
-      const btnRow = el('div', { class: 'btn-row' });
-      const testOut = el('div', { class: 'test-out' });
-      const testBtn = el('button', { class: 'btn' }, t('settings.test'));
-      const saveBtn = el('button', { class: 'btn btn-primary' }, t('settings.save'));
-      btnRow.appendChild(testBtn);
-      btnRow.appendChild(saveBtn);
-
-      // "授权登录" button — shown for providers with a webToken field (DeepSeek).
-      // Opens a login window in the desktop shell; in browser mode the server
-      // returns 501 instructing the user to paste a token manually.
-      if (m.configFields.some((f) => f.key === 'webToken')) {
-        const authBtn = el('button', { class: 'btn btn-ghost', title: currentLang() === 'zh' ? '打开 DeepSeek 登录窗口 — 自动获取会话 token' : 'Open DeepSeek login in a window — auto-captures the session token' }, '🔑 授权登录');
-        const authOut = el('div', { class: 'test-out small' });
-        btnRow.appendChild(authBtn);
-        fs.appendChild(authOut);
-        authBtn.addEventListener('click', async () => {
-          authOut.textContent = currentLang() === 'zh' ? '正在打开登录窗口…' : 'opening login window…'; authOut.className = 'test-out small';
-          try {
-            const r = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ provider: m.id }) });
-            if (r.ok && r.token) {
-              // Save the captured token as webToken, then refresh.
-              state.config = await api('/api/config', { method: 'POST', body: JSON.stringify({ provider: m.id, fields: { webToken: r.token } }) });
-              // Update placeholder.
-              if (inputs.webToken) {
-                inputs.webToken.value = '';
-                const updated = state.config.providers[m.id] || {};
-                inputs.webToken.placeholder = updated.hasWebToken ? t('settings.saved', updated.webTokenMask) : t('settings.ph.pasteWebToken');
-              }
-              authOut.textContent = currentLang() === 'zh' ? '✓ 登录成功，已保存 web token' : '✓ Login OK, web token saved'; authOut.className = 'test-out small ok';
-              loadAll();
-            } else if (r.status) {
-              authOut.textContent = t('settings.login.errStatus', r.status, r.error || 'failed'); authOut.className = 'test-out small err';
-            } else {
-              authOut.textContent = currentLang() === 'zh' ? `✗ ${r.message || '未能获取 token，请手动粘贴'}` : `✗ ${r.message || 'could not get token — paste manually'}`; authOut.className = 'test-out small err';
-            }
-          } catch (e) {
-            // 501 = not available (browser mode); instruct manual paste.
-            const msg = e.status === 501
-              ? (currentLang() === 'zh' ? '⚠ 桌面端可用一键登录；浏览器模式请手动粘贴 web token' : '⚠ One-click login is desktop-only; paste the web token manually in browser mode')
-              : `✗ ${e.message}`;
-            authOut.textContent = msg; authOut.className = 'test-out small err';
-          }
-        });
-      }
-
-      fs.appendChild(btnRow);
-      fs.appendChild(testOut);
-
-      // Collect changed field values from the inputs.
-      const collectFields = () => {
-        const fields = {};
-        for (const f of m.configFields) {
-          if (f.type === 'select') {
-            if (inputs[f.key]) fields[f.key] = inputs[f.key].value;
-          } else {
-            const v = inputs[f.key].value.trim();
-            if (v) fields[f.key] = v;
-            else if (inputs[f.key].dataset.cleared === '1') fields[f.key] = ''; // allow clearing
-          }
-        }
-        return fields;
-      };
-
-      testBtn.addEventListener('click', async () => {
-        const fields = collectFields();
-        // For providers that need at least one credential (apiKey or webToken).
-        if (!fields.apiKey && !fields.webToken) { testOut.textContent = t('settings.testEnterKey'); testOut.className = 'test-out err'; return; }
-        testOut.textContent = t('settings.testing'); testOut.className = 'test-out';
-        try {
-          const r = await api(`/api/test/${m.id}?lang=${currentLang()}`, { method: 'POST', body: JSON.stringify({ fields }) });
-          if (r.status === 'ok') {
-            testOut.textContent = t('settings.testOk', r.summary || t('status.ok'));
-            testOut.className = 'test-out ok';
-          } else {
-            // Show the localized status label instead of the raw English code.
-            const KNOWN = ['ok', 'unauthorized', 'sourceRateLimited', 'timeout', 'unavailable', 'notConfigured', 'blockedHost'];
-            const label = KNOWN.includes(r.status) ? t(`status.${r.status}`) : r.status;
-            // The server error already carries the label + HTTP code (e.g. 「未授权 (401)」) —
-            // prefer it directly to avoid 「未授权 — 未授权 (401)」.
-            const text = r.error ? (r.error.startsWith(label) ? r.error : `${label} — ${r.error}`) : label;
-            testOut.textContent = t('settings.testErr', text);
-            testOut.className = 'test-out err';
-          }
-        } catch (e) {
-          testOut.textContent = t('settings.testErr', e.message);
-          testOut.className = 'test-out err';
-        }
-      });
-
-      saveBtn.addEventListener('click', async () => {
-        const fields = collectFields();
-        if (!Object.keys(fields).length) { testOut.textContent = t('settings.nothingToSave'); testOut.className = 'test-out err'; return; }
-        try {
-          state.config = await api('/api/config', { method: 'POST', body: JSON.stringify({ provider: m.id, fields }) });
-          // Clear input values & update placeholders.
-          for (const f of m.configFields) {
-            if (f.type === 'select') continue;
-            if (inputs[f.key]) {
-              inputs[f.key].value = '';
-              const fp = fieldPlaceholders[f.key] || {};
-              const updated = state.config.providers[m.id] || {};
-              const saved = updated[fp.savedKey];
-              const mask = updated[fp.maskKey];
-              inputs[f.key].placeholder = saved ? t('settings.saved', mask) : (f.hint || (fp.ph || t('settings.ph.pasteValue')));
-              delete inputs[f.key].dataset.cleared;
-            }
-          }
-          testOut.textContent = t('settings.savedOk'); testOut.className = 'test-out ok';
-          loadAll();
-        } catch (e) {
-          testOut.textContent = t('settings.testErr', e.message); testOut.className = 'test-out err';
-        }
-      });
-
-      body.appendChild(fs);
-    }
+    for (const m of state.meta) body.appendChild(buildProviderFieldset(m));
     document.getElementById('modal').classList.remove('hidden');
   }
 

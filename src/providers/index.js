@@ -1,9 +1,12 @@
 // Provider registry. Each provider exports `meta` (declarative UI/auth info)
 // and an async `fetch({ config })` returning a normalized result object.
 //
-// Result contract (all providers):
+// Result contract (all providers, one result PER ACCOUNT):
 //   {
 //     provider, name, status, updatedAt,
+//     accountId,               // which account of the provider produced this
+//     accountLabel?,           // user-set label (e.g. "work")
+//     accountMask?,            // masked key — distinguishes unlabeled accounts
 //     dashboard?,             // link to the provider's web console
 //     plan?,                  // z.ai (subscription/product name)
 //     renewsAt?,              // z.ai (subscription renewal, ISO)
@@ -25,6 +28,7 @@
 //           notConfigured | blockedHost
 
 import { tr, errorText } from '../i18n.js';
+import { maskSecret, DEFAULT_ACCOUNT_ID } from '../config.js';
 import * as zai from './zai.js';
 import * as deepseek from './deepseek.js';
 import * as opencode from './opencode.js';
@@ -42,25 +46,43 @@ export function getProvider(id) {
   return PROVIDERS.find((p) => p.meta.id === id) || null;
 }
 
-// Run a single provider by id with its config slice. `opts` may carry `lang`
-// ('en' | 'zh') which providers use to compose their human-readable strings.
-export async function runProvider(id, config, opts = {}) {
-  const provider = getProvider(id);
+// Accounts of a provider from a normalized config (see config.js). Always an
+// array; empty when nothing is configured for the provider.
+export function listAccounts(config, providerId) {
+  const slice = config?.providers?.[providerId];
+  const accounts = Array.isArray(slice?.accounts) ? slice.accounts : [];
+  return accounts.filter((a) => a && typeof a === 'object');
+}
+
+// Run one provider for one account. The account's fields become the provider
+// config slice; `accountId` rides along so consumers (e.g. DeepSeek's spend
+// tracker) can scope per-account state.
+export async function runAccount(providerId, account, opts = {}) {
+  const provider = getProvider(providerId);
+  const id = account?.id || DEFAULT_ACCOUNT_ID;
+  const base = {
+    provider: providerId,
+    accountId: id,
+    accountLabel: account?.label || null,
+    // Mask of whichever credential the account has — distinguishes cards in
+    // multi-account providers even for webToken-only accounts.
+    accountMask: maskSecret(account?.apiKey || account?.webToken || ''),
+  };
   if (!provider) {
     return {
-      provider: id,
-      name: id,
+      ...base,
+      name: providerId,
       status: 'unavailable',
       updatedAt: new Date().toISOString(),
       error: tr(opts.lang, 'error.unknownProvider'),
     };
   }
-  const providerConfig = config?.providers?.[id] || {};
   try {
-    return await provider.fetch({ config: providerConfig, lang: opts.lang });
+    const result = await provider.fetch({ config: { ...account, accountId: id }, lang: opts.lang });
+    return { ...base, ...result, accountId: id };
   } catch (err) {
     return {
-      provider: id,
+      ...base,
       name: provider.meta.name,
       status: 'unavailable',
       updatedAt: new Date().toISOString(),
@@ -69,9 +91,17 @@ export async function runProvider(id, config, opts = {}) {
   }
 }
 
-// Run every provider that has a key configured, in parallel. Providers without a
-// key are returned as notConfigured so the UI can prompt for setup.
+// Run every account of one provider. A provider with no configured accounts
+// yields a single notConfigured result (so the UI can prompt for setup).
+export async function runProvider(id, config, opts = {}) {
+  const accounts = listAccounts(config, id);
+  if (!accounts.length) return [await runAccount(id, { id: DEFAULT_ACCOUNT_ID }, opts)];
+  return Promise.all(accounts.map((a) => runAccount(id, a, opts)));
+}
+
+// Run every configured account of every provider, in parallel.
 export async function runAll(config, opts = {}) {
   const ids = PROVIDERS.map((p) => p.meta.id);
-  return Promise.all(ids.map((id) => runProvider(id, config, opts)));
+  const perProvider = await Promise.all(ids.map((id) => runProvider(id, config, opts)));
+  return perProvider.flat();
 }

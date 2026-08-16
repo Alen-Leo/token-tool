@@ -14,7 +14,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, saveConfig, maskSecret, cleanSecret } from './config.js';
+import { loadConfig, saveConfig, maskSecret, cleanSecret, newAccountId, DEFAULT_ACCOUNT_ID } from './config.js';
 import { generateSessionToken, timingSafeEqualStrings, extractToken } from './security.js';
 import { providerMeta, runAll, runProvider, getProvider } from './providers/index.js';
 
@@ -228,8 +228,8 @@ async function handleApi(req, res, url, handlers = {}) {
   const single = /^\/api\/query\/([\w-]+)$/.exec(pathname);
   if (single && req.method === 'GET') {
     const lang = url.searchParams.get('lang') === 'zh' ? 'zh' : 'en';
-    const result = await runProvider(single[1], config, { lang });
-    return send(res, 200, result);
+    const results = await runProvider(single[1], config, { lang });
+    return send(res, 200, { results });
   }
 
   // Read config (keys masked, presence flagged).
@@ -237,8 +237,15 @@ async function handleApi(req, res, url, handlers = {}) {
     return send(res, 200, publicConfig(config));
   }
 
-  // Write provider config (api keys / region) or UI prefs (language / order).
-  // Body: { provider, fields } and/or { ui: { lang, order } }.
+  // Write provider config (per-account credentials) or UI prefs.
+  // Body variants (may also carry { ui } in the same request):
+  //   { provider, fields }                     update/create the default account
+  //   { provider, accountId, fields }          update one account
+  //   { provider, addAccount: true, fields }   append a new account
+  //   { provider, removeAccount: <accountId> } drop an account
+  //   { ui: { lang, order } }                  prefs only
+  // `fields` supports apiKey / webToken / region / label; an empty string
+  // removes the field, an absent key leaves it untouched.
   if (pathname === '/api/config' && req.method === 'POST') {
     const body = await readBody(req, res);
     let parsed;
@@ -247,52 +254,84 @@ async function handleApi(req, res, url, handlers = {}) {
     } catch {
       return send(res, 400, { error: 'invalid json' });
     }
-    const { provider: id, fields: rawFields, ui } = parsed || {};
+    const { provider: id, accountId, fields: rawFields, addAccount, removeAccount, ui } = parsed || {};
     if (!id && !ui) return send(res, 400, { error: 'nothing to update' });
     if (id && !getProvider(id)) return send(res, 400, { error: 'unknown provider' });
     // Absent fields = no field updates (e.g. a ui-only body that names a
     // provider); a present-but-non-object fields is a client error.
     const fields = rawFields ?? {};
     if (typeof fields !== 'object' || Array.isArray(fields)) return send(res, 400, { error: 'invalid fields' });
+    const wantAccount = String(accountId || '').trim();
+    if (id && wantAccount.includes(':')) return send(res, 400, { error: 'invalid account id' });
+    if (id && addAccount && removeAccount) return send(res, 400, { error: 'conflicting operations' });
+    if (id && removeAccount && (typeof removeAccount !== 'string' || !removeAccount.trim() || removeAccount.includes(':'))) {
+      return send(res, 400, { error: 'invalid account id' });
+    }
+    if (id && addAccount && !['apiKey', 'webToken', 'region', 'label'].some((k) => fields[k] != null && String(fields[k]).trim())) {
+      return send(res, 400, { error: 'nothing to add' });
+    }
 
-    const next = saveConfig((c) => {
+    saveConfig((c) => {
       c.providers = c.providers || {};
       if (id) {
-        const current = c.providers[id] || {};
-        const merged = { ...current };
-        if (Object.prototype.hasOwnProperty.call(fields, 'apiKey')) {
-          const v = cleanSecret(fields.apiKey);
-          if (v) merged.apiKey = v;
-          else delete merged.apiKey; // empty → remove key
+        const slice = c.providers[id] || { accounts: [] };
+        const accounts = Array.isArray(slice.accounts) ? slice.accounts : [];
+
+        if (removeAccount) {
+          const index = accounts.findIndex((a) => a.id === removeAccount);
+          if (index !== -1) accounts.splice(index, 1);
+          // Drop the removed card from the persisted order right away.
+          if (Array.isArray(c.ui?.order)) {
+            c.ui.order = c.ui.order.filter((e) => e !== `${id}:${removeAccount}`);
+          }
+        } else if (addAccount) {
+          accounts.push({ id: newAccountId(accounts.map((a) => a.id)), ...applyFields({}, fields) });
+        } else {
+          // Update: the named account, or without an accountId the first one.
+          // A provider with no accounts gets the "default" one materialized —
+          // but only when the request actually carries a field to write, so a
+          // provider-only body stays a no-op (legacy behaviour).
+          let index = wantAccount ? accounts.findIndex((a) => a.id === wantAccount) : accounts.length ? 0 : -1;
+          if (index === -1 && !wantAccount && Object.keys(fields).length) {
+            accounts.push({ id: DEFAULT_ACCOUNT_ID });
+            index = accounts.length - 1;
+          }
+          if (index !== -1) accounts[index] = applyFields(accounts[index], fields);
         }
-        if (Object.prototype.hasOwnProperty.call(fields, 'webToken')) {
-          const v = cleanSecret(fields.webToken);
-          if (v) merged.webToken = v;
-          else delete merged.webToken; // empty → remove web token
-        }
-        if (Object.prototype.hasOwnProperty.call(fields, 'region')) {
-          merged.region = String(fields.region || 'global');
-        }
-        c.providers[id] = merged;
+
+        if (accounts.length) c.providers[id] = { accounts };
+        else delete c.providers[id]; // last account removed → provider empty
       }
       if (ui && typeof ui === 'object') {
         c.ui = c.ui || {};
         // Language: only the two supported values are accepted.
         if (ui.lang === 'zh' || ui.lang === 'en') c.ui.lang = ui.lang;
-        // Order: an array of valid provider ids, deduplicated, preserving order.
+        // Order: provider ids ('zai') or card keys ('zai:accountId'),
+        // deduplicated, unknown/stale entries pruned.
         if (Array.isArray(ui.order)) {
           const known = new Set(providerMeta().map((p) => p.id));
           const seen = new Set();
           const order = [];
-          for (const p of ui.order) {
-            if (known.has(p) && !seen.has(p)) { seen.add(p); order.push(p); }
+          for (const entry of ui.order) {
+            if (typeof entry !== 'string') continue;
+            const key = entry.trim();
+            if (!key || seen.has(key)) continue;
+            const [pid, acc, ...rest] = key.split(':');
+            if (!known.has(pid) || rest.length) continue;
+            // 'env' accounts exist only at runtime (env-var synthesized), never
+            // on disk — their card entries must survive disk-state validation.
+            if (acc !== undefined && acc !== 'env' && !accountExists(c.providers, pid, acc)) continue;
+            seen.add(key);
+            order.push(key);
           }
           c.ui.order = order;
         }
       }
       return c;
     });
-    return send(res, 200, publicConfig(next));
+    // Respond with the env-merged view (same shape as GET) so the client's
+    // state.config keeps env-var accounts after a write, not just on reads.
+    return send(res, 200, publicConfig(loadConfig()));
   }
 
   // Live-test a provider with a key WITHOUT saving it (ephemeral). Body: { fields }.
@@ -344,17 +383,44 @@ async function handleApi(req, res, url, handlers = {}) {
   return send(res, 404, { error: 'not found' });
 }
 
-// What the UI sees: keys are masked; presence is explicit. Raw keys never leave.
+// Merge posted `fields` into an existing account (or a fresh {}). Present
+// keys overwrite; an empty value removes the field; absent keys are no-ops.
+function applyFields(account, fields) {
+  const merged = { ...account };
+  for (const key of ['apiKey', 'webToken', 'region', 'label']) {
+    if (!Object.prototype.hasOwnProperty.call(fields, key)) continue;
+    const v = String(fields[key] ?? '').trim();
+    if (v) merged[key] = key === 'apiKey' || key === 'webToken' ? cleanSecret(v) : v;
+    else delete merged[key]; // empty → remove the credential / label
+  }
+  return merged;
+}
+
+// Does provider `pid` currently hold an account with id `acc`? Used to prune
+// stale card-order entries at save time.
+function accountExists(providers, pid, acc) {
+  const accounts = providers?.[pid]?.accounts;
+  return Array.isArray(accounts) && accounts.some((a) => a && a.id === acc);
+}
+
+// What the UI sees: per-provider account descriptors with masked keys and
+// explicit presence. Raw keys never leave the server.
 function publicConfig(config) {
   const providers = {};
-  for (const [id, p] of Object.entries(config.providers || {})) {
-    providers[id] = {
-      hasKey: Boolean(cleanSecret(p.apiKey)),
-      keyMask: maskSecret(p.apiKey || ''),
-      hasWebToken: Boolean(cleanSecret(p.webToken)),
-      webTokenMask: maskSecret(p.webToken || ''),
-      region: p.region || 'global',
-    };
+  for (const p of providerMeta()) {
+    const slice = config.providers?.[p.id];
+    const accounts = (Array.isArray(slice?.accounts) ? slice.accounts : [])
+      .filter((a) => a && typeof a === 'object')
+      .map((a) => ({
+        id: a.id,
+        label: a.label || null,
+        hasKey: Boolean(cleanSecret(a.apiKey)),
+        keyMask: maskSecret(a.apiKey || ''),
+        hasWebToken: Boolean(cleanSecret(a.webToken)),
+        webTokenMask: maskSecret(a.webToken || ''),
+        region: a.region || null,
+      }));
+    providers[p.id] = { accounts };
   }
   return {
     ui: { lang: config.ui?.lang === 'zh' ? 'zh' : 'en', order: Array.isArray(config.ui?.order) ? config.ui.order : [] },

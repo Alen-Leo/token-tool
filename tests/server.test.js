@@ -105,8 +105,8 @@ test('config GET masks keys and never returns raw secrets', async () => {
   const body = await res.json();
   assert.ok(body.providers);
   for (const p of Object.values(body.providers)) {
-    assert.equal(p.hasKey, false); // no keys configured in test
-    assert.ok(!('apiKey' in p), 'raw apiKey must never leave the server');
+    assert.ok(Array.isArray(p.accounts));
+    assert.equal(p.accounts.length, 0); // nothing configured in this test dir
   }
 });
 
@@ -170,7 +170,7 @@ test('config POST with a provider but no fields is a no-op, not a 500', async ()
   });
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.equal(body.providers.zai.hasKey, false);
+  assert.equal(body.providers.zai.accounts.length, 0);
 });
 
 test('config POST rejects non-object fields with 400 invalid fields', async () => {
@@ -218,8 +218,7 @@ test('stop closes the server so its port is released', async () => {
   await assert.rejects(() => fetch(`${local.base}/api/health`));
 });
 
-test('createServer honors the port from config.json when none is passed', async () => {
-  // Find a free port, then point a temporary config dir at it.
+test('createServer honors the port from config.json when none is passed', async () => {  // Find a free port, then point a temporary config dir at it.
   const probe = net.createServer();
   await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
   const freePort = probe.address().port;
@@ -237,4 +236,146 @@ test('createServer honors the port from config.json when none is passed', async 
     process.env.TOKEN_TOOL_CONFIG_DIR = prevEnv;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- multi-account flow ----------------------------------------------------
+// Keyless accounts only — provider fetches return notConfigured without any
+// network egress, keeping these tests hermetic. (No /api/query call is made
+// while any account carries an apiKey.)
+
+function postConfig(payload) {
+  return authed('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+test('config POST without accountId materializes the default account', async () => {
+  let res = await postConfig({ provider: 'zai', fields: { apiKey: 'sk-multi-aaaaaaaaaa', region: 'global' } });
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 1);
+  assert.equal(body.providers.zai.accounts[0].id, 'default');
+  assert.equal(body.providers.zai.accounts[0].hasKey, true);
+  assert.equal(body.providers.zai.accounts[0].keyMask.includes('sk-multi-aaaaaaaaaa'), false);
+});
+
+test('config POST addAccount appends a second, distinct account', async () => {
+  const res = await postConfig({ provider: 'zai', addAccount: true, fields: { apiKey: 'sk-multi-bbbbbbbbbb', label: '工作' } });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 2);
+  const ids = body.providers.zai.accounts.map((a) => a.id);
+  assert.equal(new Set(ids).size, 2);
+  const second = body.providers.zai.accounts[1];
+  assert.equal(second.label, '工作');
+  assert.equal(second.hasKey, true);
+});
+
+test('config POST updates one account by id, others untouched', async () => {
+  const before = (await (await authed('/api/config')).json()).providers.zai.accounts;
+  const target = before[1].id;
+  const res = await postConfig({ provider: 'zai', accountId: target, fields: { label: '个人' } });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 2);
+  assert.equal(body.providers.zai.accounts.find((a) => a.id === target).label, '个人');
+  assert.equal(body.providers.zai.accounts.find((a) => a.id !== target).label, null);
+});
+
+test('config POST rejects updates for an unknown accountId cleanly', async () => {
+  const res = await postConfig({ provider: 'zai', accountId: 'nosuch', fields: { label: 'x' } });
+  assert.equal(res.status, 200); // no-op update, config unchanged
+  const body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 2);
+});
+
+test('config POST removeAccount deletes one account; last removal empties the provider', async () => {
+  const cfg = (await (await authed('/api/config')).json()).providers.zai.accounts;
+  let res = await postConfig({ provider: 'zai', removeAccount: cfg[1].id });
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 1);
+
+  res = await postConfig({ provider: 'zai', removeAccount: 'default' });
+  assert.equal(res.status, 200);
+  body = await res.json();
+  assert.equal(body.providers.zai.accounts.length, 0);
+
+  // Provider is gone from the persisted file, not just the response.
+  const raw = JSON.parse(fs.readFileSync(path.join(TMP_CONFIG, 'config.json'), 'utf8'));
+  assert.equal(raw.providers.zai, undefined);
+});
+
+// Two KEYLESS accounts (label only) so /api/query stays hermetic.
+test('query fans out per account — one notConfigured result each', async () => {
+  await postConfig({ provider: 'zai', addAccount: true, fields: { label: '工作' } });
+  await postConfig({ provider: 'zai', addAccount: true, fields: { label: '个人' } });
+
+  const res = await authed('/api/query');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  // 2 z.ai accounts + 5 providers with none (one notConfigured result each).
+  assert.equal(body.results.length, 7);
+  const zai = body.results.filter((r) => r.provider === 'zai');
+  assert.equal(zai.length, 2);
+  assert.equal(new Set(zai.map((r) => r.accountId)).size, 2);
+  for (const r of zai) {
+    assert.equal(r.status, 'notConfigured');
+    assert.ok(r.accountId);
+  }
+});
+
+test('single-provider query returns a per-account results array', async () => {
+  const res = await authed('/api/query/zai');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.ok(Array.isArray(body.results));
+  assert.equal(body.results.length, 2);
+});
+
+test('config POST addAccount without any fields is rejected with 400', async () => {
+  const res = await postConfig({ provider: 'moonshot', addAccount: true, fields: {} });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'nothing to add');
+});
+
+test('config POST rejects malformed account ids', async () => {
+  let res = await postConfig({ provider: 'moonshot', accountId: 'a:b', fields: { label: 'x' } });
+  assert.equal(res.status, 400);
+  res = await postConfig({ provider: 'moonshot', removeAccount: 'a:b' });
+  assert.equal(res.status, 400);
+});
+
+test('ui.order accepts card keys, prunes stale accounts, keeps group entries', async () => {
+  const cfg = (await (await authed('/api/config')).json()).providers.zai.accounts;
+  const first = cfg[0].id;
+  const second = cfg[1].id;
+
+  // Card key + bare provider entry + unknown junk.
+  let res = await postConfig({ ui: { order: [`zai:${first}`, 'zai', 'deepseek', `zai:${second}`, 'zai:ghost', 'nope', `zai:${first}`] } });
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  // 'zai:ghost' (no such account), 'nope' (no such provider) and the duplicate
+  // 'zai:<first>' are dropped; the rest survives in order.
+  assert.deepEqual(body.ui.order, [`zai:${first}`, 'zai', 'deepseek', `zai:${second}`]);
+
+  // Removing an account prunes its card entry immediately.
+  await postConfig({ provider: 'zai', removeAccount: second });
+  res = await authed('/api/config');
+  body = await res.json();
+  assert.deepEqual(body.ui.order, [`zai:${first}`, 'zai', 'deepseek']);
+
+  // Cleanup: leave the config empty for any later assertions.
+  await postConfig({ provider: 'zai', removeAccount: first });
+});
+
+test('ui.order keeps runtime env-account card entries', async () => {
+  // 'deepseek:env' refers to an env-var-synthesized account that never exists
+  // on disk — order validation must not prune it.
+  const res = await postConfig({ ui: { order: ['deepseek:env', 'zai'] } });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.ui.order, ['deepseek:env', 'zai']);
 });

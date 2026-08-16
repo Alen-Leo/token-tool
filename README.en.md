@@ -44,6 +44,8 @@ The launcher prints an authenticated URL and opens it in your default browser. T
 - **UI** — click **⚙ Settings**, paste a key, **Test** (live probe, not saved), then **Save**.
 - **File** — copy `config.example.json` to `~/.token-tool/config.json` (perms `0600`) and edit. Or use env vars:
 
+Every provider supports **multiple accounts** (e.g. two z.ai keys): use "＋ Add account" inside the provider's settings card and give each an optional label ("work") to tell them apart; in the file that's the `providers.<id>.accounts` array (see `config.example.json`). The legacy single-key shape (credentials directly on `providers.<id>`) still works and migrates on the first save. Each account gets its own card, individually drag-reorderable.
+
 ```bash
 export ZAI_API_KEY=...        # or GLM_API_KEY / ZHIPU_API_KEY
 export DEEPSEEK_API_KEY=...
