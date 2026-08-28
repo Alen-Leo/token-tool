@@ -350,10 +350,20 @@ async function handleApi(req, res, url, handlers = {}) {
     if (fields != null && (typeof fields !== 'object' || Array.isArray(fields))) {
       return send(res, 400, { error: 'invalid fields' });
     }
+    // accountId: fall back to THIS account's saved credentials when the form
+    // inputs are empty, so "Test" works without re-pasting the key. Pasted
+    // values still win (applyFields overlays them), keeping unsaved edits
+    // testable; unknown ids yield an empty base — same as before.
+    let base = {};
+    if (typeof parsed?.accountId === 'string' && parsed.accountId) {
+      const acc = (config.providers[id]?.accounts || []).find((a) => a && a.id === parsed.accountId);
+      if (acc) base = { apiKey: acc.apiKey, webToken: acc.webToken, region: acc.region };
+    }
+    const merged = applyFields(base, fields);
     const lang = url.searchParams.get('lang') === 'zh' ? 'zh' : 'en';
     // Test is ephemeral — skipSpendTrack prevents the probe from mutating the
     // persisted spend baseline (the key under test may be a different account).
-    const ephemeralConfig = { ...fields, apiKey: cleanSecret(fields.apiKey), webToken: cleanSecret(fields.webToken), skipSpendTrack: true };
+    const ephemeralConfig = { ...merged, skipSpendTrack: true };
     const result = await provider.fetch({ config: ephemeralConfig, lang });
     return send(res, 200, result);
   }

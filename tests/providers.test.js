@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseUsage } from '../src/providers/zai.js';
+import { parseUsage, assertBusinessOk } from '../src/providers/zai.js';
 import { parseBalances, parseWebSummary, parseWebUsage, buildUsageRange, meta as deepseekMeta } from '../src/providers/deepseek.js';
 import { parseCredits } from '../src/providers/openrouter.js';
 import { parseBalance as parseSiliconFlow } from '../src/providers/siliconflow.js';
@@ -53,9 +53,44 @@ test('z.ai parseUsage is resilient without subscription', () => {
   assert.ok(windows.length >= 2);
 });
 
+test('z.ai parseUsage accepts CREDIT_LIMIT rows (current GLM plans)', () => {
+  // Captured verbatim from api.z.ai on 2026-08-28: credit buckets replaced the
+  // legacy TOKENS_LIMIT rows, and nextResetTime became epoch milliseconds.
+  const creditQuota = {
+    data: {
+      limits: [
+        { type: 'CREDIT_LIMIT', unit: 3, number: 5, usage: 2000, currentValue: 47, remaining: 1952, percentage: 2, nextResetTime: 1787935057569 },
+        { type: 'CREDIT_LIMIT', unit: 6, number: 1, usage: 10000, currentValue: 2054, remaining: 7945, percentage: 20, nextResetTime: 1788502276999 },
+      ],
+      level: 'lite',
+    },
+  };
+  const { windows } = parseUsage(creditQuota, subscription);
+  assert.deepEqual(windows.map((w) => w.kind), ['session', 'weekly']); // no TIME_LIMIT row → no monthly
+  const session = windows.find((w) => w.kind === 'session');
+  assert.equal(session.unit, 'credits');
+  assert.equal(session.usedPercent, 2.4); // (2000-1952)/2000
+  assert.equal(session.used, 48);
+  assert.equal(session.limit, 2000);
+  assert.equal(session.remainingCount, 1952);
+  assert.equal(session.resetsAt, '2026-08-28T16:37:37.569Z'); // epoch ms
+  const weekly = windows.find((w) => w.kind === 'weekly');
+  assert.equal(Math.round(weekly.usedPercent * 100) / 100, 20.55); // (10000-7945)/10000
+});
+
 test('z.ai parseUsage handles empty quota', () => {
   const { windows } = parseUsage({ data: { limits: [] } }, null);
   assert.equal(windows.length, 0);
+});
+
+test('z.ai business auth error (HTTP 200 + code 1000) maps to unauthorized', () => {
+  assert.throws(() => assertBusinessOk({ success: false, code: 1000, msg: 'Authentication Failed' }), (e) => e.status === 'unauthorized');
+  assert.throws(() => assertBusinessOk({ success: false, code: 1000, msg: '身份验证失败。' }), (e) => e.status === 'unauthorized');
+  // Malformed keys get business code 401 with a msg that lacks "auth".
+  assert.throws(() => assertBusinessOk({ success: false, code: 401, msg: 'token expired or incorrect' }), (e) => e.status === 'unauthorized');
+  // Non-auth business failures stay "unavailable", success payloads pass through.
+  assert.throws(() => assertBusinessOk({ success: false, code: 1302, msg: 'quota exhausted' }), (e) => e.status === 'unavailable');
+  assert.equal(assertBusinessOk({ data: { limits: [] } }), undefined);
 });
 
 // Sample DeepSeek balance payload (official shape).

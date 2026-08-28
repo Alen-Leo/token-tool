@@ -183,6 +183,32 @@ test('config POST rejects non-object fields with 400 invalid fields', async () =
   assert.equal((await res.json()).error, 'invalid fields');
 });
 
+test('test endpoint with accountId falls back to the saved account', async () => {
+  // Save a keyless zai account holding a non-default region. A keyless
+  // account short-circuits to notConfigured (no network egress) and echoes
+  // the region its ephemeral config resolved — so the echoed region proves
+  // the accountId lookup fed the saved account into the test.
+  await authed('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: 'zai', fields: { region: 'bigmodel-cn' } }),
+  });
+  const hit = await (await authed('/api/test/zai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: {}, accountId: 'default' }),
+  })).json();
+  assert.equal(hit.status, 'notConfigured');
+  assert.equal(hit.region, 'bigmodel-cn'); // came from the SAVED account
+  // Unknown id → empty base → default region, same as no accountId at all.
+  const miss = await (await authed('/api/test/zai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: {}, accountId: 'nope' }),
+  })).json();
+  assert.equal(miss.region, 'global');
+});
+
 test('static index.html is served at /', async () => {
   const res = await fetch(`${handle.base}/?token=${handle.sessionToken}`);
   assert.equal(res.status, 200);

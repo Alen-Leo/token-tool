@@ -534,16 +534,16 @@
   // One editor per ACCOUNT of each provider. Providers with no accounts yet
   // show a single "first account" editor (saving creates the default account)
   // to keep the single-account flow exactly as simple as before.
-  function buildAccountSection(m, { mode, account = null, multi = false, onStructureChange = () => {} }) {
+  function buildAccountSection(m, { mode, account = null, onStructureChange = () => {} }) {
     // mode: 'first' (provider empty — save creates the default account),
     //       'new' (adding another account), 'existing'.
     const isEnv = account?.id === 'env';
     const showLabel = mode !== 'first' && !isEnv; // label only matters once there are ≥2
     const wrap = el('div', { class: 'account-wrap' });
 
-    // Section header + remove/cancel — only when there is something to
-    // distinguish (several accounts) or an unsaved new form to cancel.
-    if (mode === 'new' || (mode === 'existing' && multi)) {
+    // Section header + remove/cancel — every saved account can be removed
+    // (a lone one included), and an unsaved new form gets a cancel.
+    if (mode === 'new' || mode === 'existing') {
       const title = mode === 'new'
         ? t('settings.newAccount')
         : (account.label || account.keyMask || account.webTokenMask || account.id);
@@ -693,11 +693,13 @@
 
     testBtn.addEventListener('click', async () => {
       const fields = collectFields();
-      // For providers that need at least one credential (apiKey or webToken).
-      if (!fields.apiKey && !fields.webToken) { out.textContent = t('settings.testEnterKey'); out.className = 'test-out err'; return; }
+      // Empty inputs test THIS account's saved credentials (accountId lookup
+      // server-side); the guard only fires when there is nothing saved either.
+      const saved = Boolean(account?.hasKey || account?.hasWebToken);
+      if (!fields.apiKey && !fields.webToken && !saved) { out.textContent = t('settings.testEnterKey'); out.className = 'test-out err'; return; }
       out.textContent = t('settings.testing'); out.className = 'test-out';
       try {
-        const r = await api(`/api/test/${m.id}?lang=${currentLang()}`, { method: 'POST', body: JSON.stringify({ fields }) });
+        const r = await api(`/api/test/${m.id}?lang=${currentLang()}`, { method: 'POST', body: JSON.stringify({ fields, accountId: account?.id || undefined }) });
         if (r.status === 'ok') {
           out.textContent = t('settings.testOk', r.summary || t('status.ok'));
           out.className = 'test-out ok';
@@ -780,11 +782,10 @@
     if (!accounts.length) {
       fs.appendChild(buildAccountSection(m, { mode: 'first', onStructureChange: rebuildProvider }));
     } else {
-      const multi = accounts.length > 1;
-      for (const a of accounts) fs.appendChild(buildAccountSection(m, { mode: 'existing', account: a, multi, onStructureChange: rebuildProvider }));
+      for (const a of accounts) fs.appendChild(buildAccountSection(m, { mode: 'existing', account: a, onStructureChange: rebuildProvider }));
       const addBtn = el('button', { class: 'btn btn-ghost add-account' }, t('settings.addAccount'));
       addBtn.addEventListener('click', () => {
-        fs.insertBefore(buildAccountSection(m, { mode: 'new', multi: true, onStructureChange: rebuildProvider }), addBtn);
+        fs.insertBefore(buildAccountSection(m, { mode: 'new', onStructureChange: rebuildProvider }), addBtn);
       });
       fs.appendChild(addBtn);
     }

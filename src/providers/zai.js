@@ -6,9 +6,11 @@
 //
 // Region `bigmodel-cn` (China) uses https://open.bigmodel.cn instead.
 //
-// The quota response (data.limits[]) carries TOKENS_LIMIT rows (a 5-hour
-// "session" bucket and a weekly bucket) and a TIME_LIMIT row (a monthly/MCP
-// bucket). Each row reports usage/remaining or a percentage plus a reset time.
+// The quota response (data.limits[]) carries windowed bucket rows — a 5-hour
+// "session" bucket and a weekly bucket. GLM originally typed these
+// TOKENS_LIMIT; newer plans type them CREDIT_LIMIT (prompt credits, not raw
+// tokens). A TIME_LIMIT row (monthly/MCP bucket) may also appear. Each row
+// reports usage/remaining or a percentage plus a reset time (epoch ms or ISO).
 //
 // Parsing follows the reference implementation (Javis603/token-monitor) but is
 // self-contained: no imports from that project.
@@ -86,6 +88,17 @@ function firstSubscription(body) {
   return rows.find((r) => r && typeof r === 'object') || null;
 }
 
+// The monitor endpoints answer auth failures with HTTP 200 and a business
+// error body ({ success: false, code: 1000|401, msg: ... }) instead of a 401 —
+// surface that as unauthorized, or the card would show a bare "unavailable"
+// and hide the real cause (dead / regenerated key).
+export function assertBusinessOk(body) {
+  if (!body || typeof body !== 'object' || body.success !== false) return;
+  const msg = String(body.msg || body.message || '').trim();
+  const unauthorized = ['1000', '401', '403'].includes(String(body.code ?? '')) || /auth/i.test(msg);
+  throw new HttpError(msg || 'request failed', { status: unauthorized ? 'unauthorized' : 'unavailable' });
+}
+
 function textField(src, fields) {
   if (!src || typeof src !== 'object') return '';
   for (const f of fields) {
@@ -125,6 +138,17 @@ function isSessionTokenLimit(limit) {
   return m !== null && m <= 360; // ≤ 6h → session bucket
 }
 
+// Windowed bucket rows: TOKENS_LIMIT (legacy) and CREDIT_LIMIT (current GLM
+// plans — prompt credits instead of raw tokens).
+function limitType(limit) {
+  return String(limit?.type || limit?.limit_type || '').trim().toUpperCase();
+}
+
+function isWindowLimit(limit) {
+  const t = limitType(limit);
+  return t === 'TOKENS_LIMIT' || t === 'CREDIT_LIMIT';
+}
+
 export function parseUsage(quotaBody, subscriptionBody, lang = 'en') {
   const plan = planFrom(quotaBody, subscriptionBody);
   const resetAt = subscriptionResetAt(subscriptionBody);
@@ -134,9 +158,8 @@ export function parseUsage(quotaBody, subscriptionBody, lang = 'en') {
 
   for (const limit of limits) {
     if (!limit || typeof limit !== 'object') continue;
-    const type = String(limit.type || limit.limit_type || '').trim().toUpperCase();
-    if (type === 'TOKENS_LIMIT' && usedPercent(limit) !== null) tokenLimits.push(limit);
-    else if (type === 'TIME_LIMIT' && usedPercent(limit) !== null) timeLimit = limit;
+    if (isWindowLimit(limit) && usedPercent(limit) !== null) tokenLimits.push(limit);
+    else if (limitType(limit) === 'TIME_LIMIT' && usedPercent(limit) !== null) timeLimit = limit;
   }
 
   tokenLimits.sort((a, b) => (windowMinutes(a.unit, a.number) ?? Infinity) - (windowMinutes(b.unit, b.number) ?? Infinity));
@@ -168,7 +191,9 @@ function buildWindow(limit, kind, label, { fallbackResetAt = null, monthly = fal
     usedPercent: pct,
     used,
     limit: total,
-    unit: 'tokens',
+    // CREDIT_LIMIT rows count prompt credits, not tokens — the UI falls back
+    // to a plain "used / limit" rendering for the 'credits' unit.
+    unit: limitType(limit) === 'CREDIT_LIMIT' ? 'credits' : 'tokens',
     resetsAt,
     resetDescription: monthly ? 'Monthly' : null,
   });
@@ -207,6 +232,7 @@ export async function fetch({ config, lang = 'en' }) {
       withDeadline((signal) => getJson(`${base}${SUBSCRIPTION_PATH}`, { headers, signal, timeoutMs: FETCH_TIMEOUT_MS }), { deadlineMs: FETCH_TIMEOUT_MS }),
     ]);
     if (quota.status === 'rejected') throw quota.reason;
+    assertBusinessOk(quota.value);
     const sub = subscription.status === 'fulfilled' ? subscription.value : null;
     const usage = parseUsage(quota.value, sub, lang);
     return {
